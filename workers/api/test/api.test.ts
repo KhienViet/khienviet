@@ -112,8 +112,29 @@ describe('reporting and lookup', () => {
   it('an unknown number is insufficient with zero counts', async () => {
     const r = await lookup(freshPhone());
     expect(r.status).toBe(200);
-    expect(r.body.data).toMatchObject({ risk_level: 'insufficient', total_reports: 0, unique_reporters: 0, under_review: false });
+    expect(r.body.data).toMatchObject({ risk_level: 'insufficient', recent_scam_reporters_24h: 0, total_reports: 0, unique_reporters: 0, under_review: false });
     expect(r.headers.get('Cache-Control')).toBe('public, max-age=120');
+  });
+
+  it('counts distinct scam reporters in the last 24 hours (latest vote only)', async () => {
+    const phone = freshPhone();
+    const e164 = `+84${phone.slice(1)}`;
+    const [a, b, old, changed, banned] = await Promise.all(Array.from({ length: 5 }, install));
+    await report(a!, { phone, label: 'scam' });
+    await report(b!, { phone, label: 'scam' });
+    await report(old!, { phone, label: 'scam' });
+    await report(changed!, { phone, label: 'scam' });
+    await report(changed!, { phone, label: 'safe' }); // phiếu mới nhất là safe → không tính
+    await report(banned!, { phone, label: 'scam' });
+    // Phiếu của `old` cách đây 25 giờ.
+    await env.DB.prepare('UPDATE reports SET created_at = created_at - 25 * 3600 WHERE reporter_id = (SELECT id FROM reporters WHERE token_hash = ?1)')
+      .bind(await hashToken(env, old!))
+      .run();
+    await env.DB.prepare('UPDATE reporters SET banned = 1 WHERE token_hash = ?1').bind(await hashToken(env, banned!)).run();
+    await recomputePhoneStats(env, e164, Math.floor(Date.now() / 1000));
+    const d = (await lookup(phone)).body.data;
+    expect(d.unique_scam_reporters).toBe(3);
+    expect(d.recent_scam_reporters_24h).toBe(2);
   });
 
   it('rejects an invalid number on lookup', async () => {
@@ -266,7 +287,8 @@ describe('GET /sync/numbers', () => {
     const auth = { headers: { Authorization: `Bearer ${reader}` } };
     const before = (await call('/sync/numbers', auth)).body.data.items.length;
 
-    // 3 số high mới, 1 số chỉ có 1 người báo (insufficient).
+    // 3 số high mới; 1 số chỉ có 1 người báo lừa đảo (insufficient) vẫn được đồng bộ;
+    // số chỉ có báo cáo safe/spam thì không.
     const highs = [freshPhone(), freshPhone(), freshPhone()];
     for (const phone of highs) {
       const tokens = await Promise.all(Array.from({ length: 5 }, installEstablished));
@@ -274,13 +296,21 @@ describe('GET /sync/numbers', () => {
     }
     const lone = freshPhone();
     await report(await install(), { phone: lone, label: 'scam' });
+    const notScam = freshPhone();
+    await report(await install(), { phone: notScam, label: 'safe' });
+    await report(await install(), { phone: notScam, label: 'spam' });
 
     const full = (await call('/sync/numbers', auth)).body.data;
     const phones = full.items.map((i: any) => i.phone);
-    expect(phones.length - before).toBe(3);
+    expect(phones.length - before).toBe(4);
     for (const p of highs) expect(phones).toContain(`+84${p.slice(1)}`);
-    expect(phones).not.toContain(`+84${lone.slice(1)}`);
-    expect(full.items.every((i: any) => ['medium', 'high'].includes(i.risk_level))).toBe(true);
+    expect(full.items).toContainEqual(
+      expect.objectContaining({ phone: `+84${lone.slice(1)}`, risk_level: 'insufficient', unique_scam_reporters: 1 }),
+    );
+    expect(phones).not.toContain(`+84${notScam.slice(1)}`);
+    expect(
+      full.items.every((i: any) => ['medium', 'high'].includes(i.risk_level) || i.unique_scam_reporters > 0),
+    ).toBe(true);
 
     // Phân trang: limit=1 phải đi qua đủ số phần tử, không trùng.
     const seen: string[] = [];
@@ -299,7 +329,9 @@ describe('GET /sync/numbers', () => {
     await env.DB.prepare(`UPDATE reports SET status = 'hidden' WHERE phone = ?1`).bind(e164).run();
     await recomputePhoneStats(env, e164, since + 5);
     const delta = (await call(`/sync/numbers?since=${since}`, auth)).body.data.items;
-    expect(delta).toContainEqual(expect.objectContaining({ phone: e164, risk_level: 'insufficient' }));
+    expect(delta).toContainEqual(
+      expect.objectContaining({ phone: e164, risk_level: 'insufficient', unique_scam_reporters: 0 }),
+    );
   });
 
   it.each(['since=abc', 'cursor=bad', 'limit=0', 'limit=1001', 'limit=1.5'])('rejects %s', async (q) => {

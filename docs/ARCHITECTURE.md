@@ -181,9 +181,14 @@ Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpo
 - Trả `201 {data:{accepted:true,id}}`; trùng (cùng reporter, số, nhãn, ngày UTC) trả `200 {data:{accepted:false,reason:"duplicate"}}`.
 - Lỗi: `400 invalid_json | invalid_request | invalid_phone | invalid_called_at`, `401 unauthorized`, `403 forbidden` (reporter bị cấm), `429 rate_limited`.
 
+**`GET /lookup/:phone`:**
+- `recent_scam_reporters_24h`: số người khác nhau có phiếu mới nhất là `scam` gửi trong 24 giờ qua (reporter chưa bị cấm, báo cáo `active`). Tính trực tiếp khi tra cứu, không lưu, vì giá trị tự giảm theo thời gian. Chỉ để hiển thị (ví dụ "5 người đã báo cáo số này là lừa đảo trong 24 giờ qua"), **không** dùng trong công thức điểm. Có thể chậm tối đa 2 phút do cache.
+
 **`GET /sync/numbers`:**
-- Không có `since`: mọi số `medium`/`high`.
-- Có `since` (Unix giây): mọi số có `updated_at >= since`, **kể cả số đã xuống `low`/`insufficient`**, để app xóa khỏi danh sách trên máy.
+- Không có `since`: mọi số `medium`/`high`, **và** mọi số có ít nhất 1 người báo lừa đảo (`unique_scam_reporters > 0`, kể cả `insufficient`/`low`), để app vẫn hiện chỉ báo khi offline. Số chỉ có báo cáo `safe`/`spam`/`unknown` không có trong danh sách.
+- Có `since` (Unix giây): mọi số có `updated_at >= since`, **kể cả số không còn thỏa điều kiện trên**. App giữ một số trên máy khi `risk_level` là `medium`/`high` hoặc `unique_scam_reporters > 0`; ngược lại thì xóa.
+- Không có `recent_scam_reporters_24h` (danh sách offline đồng bộ mỗi 6 giờ nên số này sẽ cũ). App lấy giá trị này từ tra cứu online khi có cuộc gọi đến.
+- Kích thước danh sách chưa tối ưu: chấp nhận lớn hơn để đủ thông tin khi offline, sẽ tối ưu sau khi có dữ liệu thật.
 - `limit` 1–1000 (mặc định 1000); trang tiếp theo dùng `next_cursor` (null khi hết).
 - App lưu `server_time` của trang đầu tiên làm `since` cho lần đồng bộ sau.
 - Phần tử: `{phone, risk_level, unique_scam_reporters, under_review}`.
@@ -202,6 +207,7 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
     "safe_reports": 2,
     "unique_reporters": 96,
     "unique_scam_reporters": 90,
+    "recent_scam_reporters_24h": 5,
     "top_scenarios": [{"key": "fake_police", "count": 71}, {"key": "investment", "count": 22}],
     "first_reported_at": "2026-10-01T03:12:00Z",
     "last_reported_at": "2026-11-05T09:40:00Z",

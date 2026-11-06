@@ -141,6 +141,8 @@ interface StatsRow {
   under_review: number;
 }
 
+const RECENT_WINDOW = 24 * 3600;
+
 app.get('/lookup/:phone', async (c) => {
   if (!(await underLimit(c.env.READ_LIMITER, clientKey(c)))) {
     return fail(c, 429, 'rate_limited', 'Quá nhiều yêu cầu, vui lòng thử lại sau.');
@@ -148,7 +150,22 @@ app.get('/lookup/:phone', async (c) => {
   const phone = normalizePhone(c.req.param('phone'));
   if (!phone) return fail(c, 400, 'invalid_phone', 'Số điện thoại không hợp lệ.');
 
-  const row = await c.env.DB.prepare(`SELECT * FROM phone_stats WHERE phone = ?1`).bind(phone.e164).first<StatsRow>();
+  const now = nowSec();
+  const [statsRes, recentRes] = await c.env.DB.batch([
+    c.env.DB.prepare(`SELECT * FROM phone_stats WHERE phone = ?1`).bind(phone.e164),
+    // Số người khác nhau có phiếu mới nhất là `scam` và được gửi trong 24 giờ qua.
+    // Tính trực tiếp (không lưu) vì giá trị tự giảm theo thời gian mà không cần báo cáo mới.
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT r.label, r.created_at,
+                ROW_NUMBER() OVER (PARTITION BY r.reporter_id ORDER BY r.created_at DESC, r.rowid DESC) AS rn
+         FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
+         WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0
+       ) WHERE rn = 1 AND label = 'scam' AND created_at > ?2`,
+    ).bind(phone.e164, now - RECENT_WINDOW),
+  ]);
+  const row = statsRes!.results[0] as StatsRow | undefined;
+  const recent = (recentRes!.results[0] as { n: number } | undefined)?.n ?? 0;
   c.header('Cache-Control', 'public, max-age=120');
   return c.json({
     data: {
@@ -161,6 +178,7 @@ app.get('/lookup/:phone', async (c) => {
       safe_reports: row?.safe_reports ?? 0,
       unique_reporters: row?.unique_reporters ?? 0,
       unique_scam_reporters: row?.unique_scam_reporters ?? 0,
+      recent_scam_reporters_24h: recent,
       top_scenarios: row?.top_scenarios ? (JSON.parse(row.top_scenarios) as unknown) : [],
       first_reported_at: iso(row?.first_reported_at ?? null),
       last_reported_at: iso(row?.last_reported_at ?? null),
@@ -170,8 +188,9 @@ app.get('/lookup/:phone', async (c) => {
 });
 
 // ---------- GET /sync/numbers?since=<epoch>&cursor=<opaque>&limit=<1..1000> ----------
-// Không có `since`: toàn bộ số medium/high. Có `since`: mọi số thay đổi từ thời điểm đó
-// (kể cả số đã xuống low/insufficient, để app xóa khỏi danh sách trên máy).
+// Không có `since`: mọi số medium/high hoặc có ít nhất 1 người báo lừa đảo.
+// Có `since`: mọi số thay đổi từ thời điểm đó, kể cả số không còn thỏa điều kiện trên,
+// để app xóa khỏi danh sách trên máy.
 const SYNC_PAGE_MAX = 1000;
 const CURSOR = /^(\d{1,12})_(\+\d{8,15})$/;
 
@@ -198,7 +217,9 @@ app.get('/sync/numbers', requireInstall, async (c) => {
   // Lấy thời điểm TRƯỚC khi truy vấn, để thay đổi xảy ra trong lúc truy vấn được lấy ở lần sau.
   const serverTime = nowSec();
   const where =
-    sinceRaw === undefined ? `risk_level IN ('medium','high')` : `updated_at >= ?4`;
+    sinceRaw === undefined
+      ? `(risk_level IN ('medium','high') OR unique_scam_reporters > 0)`
+      : `updated_at >= ?4`;
   const stmt = c.env.DB.prepare(
     `SELECT phone, risk_level, unique_scam_reporters, under_review, updated_at FROM phone_stats
      WHERE ${where} AND (updated_at, phone) > (?1, ?2)
