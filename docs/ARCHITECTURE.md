@@ -115,48 +115,47 @@ CREATE TABLE disputes (
 
 Ghi chú:
 - `token_hash` là HMAC-SHA256 với khóa `PEPPER` (Worker secret), không phải SHA-256 của chuỗi ghép: HMAC là cách chuẩn để dùng một khóa bí mật khi băm.
+- Người dùng chỉ báo cáo "lừa đảo": API luôn ghi `label = 'scam'`. Cột `label` và các cột `spam_reports`, `safe_reports` vẫn còn trong schema vì không sửa migration đã áp dụng; `spam_reports`/`safe_reports` luôn bằng 0, `scam_reports` bằng `total_reports`, `unique_reporters` bằng `unique_scam_reporters`. Dòng có nhãn khác (dữ liệu cũ hoặc seed) bị bỏ qua khi tính.
+- Chỉ mục `uq_reports_dedupe` vẫn có `label` nhưng vì chỉ còn một nhãn, thực tế là 1 báo cáo/số/reporter/ngày (UTC).
 - `phone_stats.updated_at` chỉ đổi khi `risk_level` hoặc `unique_scam_reporters` đổi, để app đồng bộ delta mà không tải lại các số không thay đổi.
 
 ## 4. Thuật toán điểm nguy cơ (công khai)
 
-Với mỗi phiếu được tính của một số (mỗi reporter một phiếu, xem bên dưới):
+Người dùng chỉ báo cáo một loại: "lừa đảo". Không có nhãn "an toàn" hay "làm phiền". Mỗi người có tối đa một phiếu cho một số, và chỉ rút được trong 1 giờ sau khi gửi (mục 5).
+
+Với mỗi phiếu được tính của một số:
 
 ```
 w_time   = 0.5 ^ (tuổi_phiếu_ngày / 30)          // half-life 30 ngày
 w_trust  = reporters.trust_score                 // 0.1 .. 3.0
 w_warmup = 0.5 nếu tài khoản chưa đủ 3 ngày tuổi, ngược lại 1
-w        = w_time × w_trust × w_warmup
-v_label  = scam: +1.0 | spam: +0.3 | safe: -1.0 | unknown: 0
 
-score      = Σ (w × v_label)
-scam_ratio = Σ w (phiếu scam) / Σ w (mọi phiếu)
-established_scam_reporters = số người báo scam có tài khoản từ 3 ngày tuổi trở lên
+score                = Σ (w_time × w_trust × w_warmup)
+established_reporters = số người báo có tài khoản từ 3 ngày tuổi trở lên
 ```
 
 Phân loại mức nguy cơ:
 
 | Mức | Điều kiện |
 |---|---|
-| `insufficient` | `unique_reporters < 3` |
-| `low` | `score < 1.5` hoặc `scam_ratio < 0.3` |
-| `medium` | `score >= 1.5` và `scam_ratio >= 0.3` |
-| `high` | `score >= 4` và `scam_ratio >= 0.7` và `established_scam_reporters >= 5` |
+| `insufficient` | ít hơn 3 người báo |
+| `low` | `score < 1.5` |
+| `medium` | `score >= 1.5` |
+| `high` | `score >= 4` và `established_reporters >= 5` |
 
-**Phiếu nào được tính:** chỉ báo cáo `active` của reporter chưa bị cấm (`banned = 0`). Mỗi reporter chỉ tính phiếu mới nhất cho một số (theo `created_at`, nếu trùng giây thì theo thứ tự ghi). Các số đếm thô (`total_reports`, `scam_reports`...) đếm mọi báo cáo `active` của reporter chưa bị cấm. Phiếu có thời điểm ở tương lai (lệch đồng hồ) được tính như phiếu mới, không nặng hơn.
+**Phiếu nào được tính:** chỉ báo cáo `active` của reporter chưa bị cấm (`banned = 0`). Mỗi reporter chỉ tính báo cáo mới nhất cho một số (theo `created_at`, nếu trùng giây thì theo thứ tự ghi): báo lại vào ngày khác làm phiếu "mới" lại nhưng không thành hai phiếu. `total_reports` đếm mọi báo cáo `active` của reporter chưa bị cấm. Phiếu có thời điểm ở tương lai (lệch đồng hồ) được tính như phiếu mới, không nặng hơn.
 
-**Vì sao `scam_ratio` theo trọng số:** nếu tỷ lệ đếm theo người, hạ trust của tài khoản đáng ngờ không có tác dụng với tỷ lệ. Ví dụ 6 người báo lừa đảo + 20 tài khoản trust 0.1 báo an toàn: đếm theo người cho 6/26 = 0.23 (`low`), theo trọng số cho 6 / (6 + 2) = 0.75 (`high`). Tỷ lệ cũng giảm theo thời gian như `score`, nên phiếu cũ ảnh hưởng ít hơn phiếu mới ở cả hai.
+**Thời gian làm quen:** tài khoản mới tạo hàng loạt không thể đẩy một số lên `high` ngay. Tuổi tài khoản tính tại lúc tính điểm, không phải lúc bỏ phiếu: người dùng thật thường cài app rồi báo ngay sau một cuộc gọi, và phiếu đó được đủ trọng số khi tài khoản qua 3 ngày (cron tính lại mỗi 6 giờ). Kẻ tấn công chuẩn bị trước chỉ bị chậm 3 ngày; khoảng này dành cho phát hiện bất thường (mục 6). Hệ quả: trong 3 ngày đầu sau khi ra mắt, chưa số nào đạt `high` từ báo cáo của cộng đồng. 3 tài khoản mới cho `score` = 1.5, vừa đủ `medium`.
 
-**Thời gian làm quen:** tài khoản mới tạo hàng loạt không thể đẩy một số lên `high` ngay. Tuổi tài khoản tính tại lúc tính điểm, không phải lúc bỏ phiếu: người dùng thật thường cài app rồi báo ngay sau một cuộc gọi, và phiếu đó được đủ trọng số khi tài khoản qua 3 ngày (cron tính lại mỗi 6 giờ). Kẻ tấn công chuẩn bị trước chỉ bị chậm 3 ngày; khoảng này dành cho phát hiện bất thường (mục 6). Hệ quả: trong 3 ngày đầu sau khi ra mắt, chưa số nào đạt `high` từ báo cáo của cộng đồng.
-
-`unique_scam_reporters` hiển thị cho người dùng vẫn đếm mọi người báo lừa đảo, kể cả tài khoản mới.
+`unique_scam_reporters` hiển thị cho người dùng đếm mọi người báo, kể cả tài khoản mới.
 
 Nếu `under_review = 1`, mức `high` bị hạ thành `medium`: giao diện và app hiển thị "Đang xem xét khiếu nại" kèm số liệu thô, không hiện cảnh báo mức cao.
 
-**Điểm yếu còn lại:** nhiều tài khoản có trust bình thường cùng báo `safe` vẫn hạ được mức của một số (6 scam + 7 safe, cùng trust 1.0, cho `score` = -1). Công thức không chặn được việc này; phải dựa vào phát hiện bất thường (mục 6) để hạ trust các tài khoản đó.
+**Sửa báo cáo sai:** không có phiếu "an toàn" để cộng đồng phản bác. Một số bị báo nhầm chỉ giảm mức qua: người báo tự rút trong 1 giờ; khiếu nại của chủ thuê bao (`under_review`, rồi ẩn báo cáo nếu chấp nhận); phát hiện bất thường hạ trust hoặc ẩn báo cáo; và giảm trọng số theo thời gian (mỗi 30 ngày còn một nửa).
 
 Các ngưỡng (kể cả `WARMUP_DAYS`, `WARMUP_WEIGHT`) là tham số cấu hình (`wrangler.toml` vars) và sẽ được hiệu chỉnh khi có dữ liệu thật.
 
-**Uy tín người báo cáo** (chưa làm, hiện mọi tài khoản đều 1.0): khởi đầu 1.0. Tăng dần khi báo cáo của họ trùng với kết luận của số đông sau 14 ngày; giảm khi lệch nhiều lần; đặt 0.1 nếu phát hiện hành vi bất thường.
+**Uy tín người báo cáo** (chưa làm, hiện mọi tài khoản đều 1.0): khởi đầu 1.0. Tăng dần khi số họ báo được nhiều người khác báo theo (sau 14 ngày); giảm khi số họ báo bị khiếu nại thành công; đặt 0.1 nếu phát hiện hành vi bất thường.
 
 ## 5. API (Workers)
 
@@ -166,7 +165,8 @@ Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpo
 | Method | Path | Xác thực | Mô tả | Trạng thái |
 |---|---|---|---|---|
 | POST | `/install` | rate limit theo IP | Tạo install token ẩn danh, trả về **một lần**: `{data:{token}}` | ✅ |
-| POST | `/reports` | install token | Gửi báo cáo `{phone, label, source, scenario?, note?, called_at?}` | ✅ |
+| POST | `/reports` | install token | Báo cáo một số là lừa đảo `{phone, source, scenario?, note?, called_at?}` | ✅ |
+| DELETE | `/reports/:phone` | install token | Rút báo cáo của chính mình, trong 1 giờ sau khi gửi | ✅ |
 | GET | `/lookup/:phone` | — (rate limit theo IP) | Tra cứu một số. `Cache-Control: public, max-age=120` | ✅ |
 | GET | `/sync/numbers?since=&cursor=&limit=` | install token | Danh sách cho app, phân trang và delta | ✅ |
 | GET | `/stats/summary` | — | Thống kê tổng | chưa làm |
@@ -174,18 +174,24 @@ Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpo
 | POST | `/disputes` | Turnstile | Gửi khiếu nại | chưa làm |
 
 **`POST /reports`:**
-- `label`: `scam` | `spam` | `safe` | `unknown`. `source`: `android` | `ios`.
+- Không có trường `label`: mọi báo cáo là "lừa đảo". Gửi trường lạ (kể cả `label`) trả 400. `source`: `android` | `ios`.
 - `scenario` (tùy chọn): `fake_police`, `fake_bank`, `fake_telecom`, `fake_shipper`, `investment`, `loan`, `prize`, `job_offer`, `other`.
 - `note` (tùy chọn): qua `sanitizeNote()` trước khi lưu (mục 6).
 - `called_at` (tùy chọn): ISO 8601, không quá 30 ngày trước và không ở tương lai (cho lệch 5 phút).
-- Trả `201 {data:{accepted:true,id}}`; trùng (cùng reporter, số, nhãn, ngày UTC) trả `200 {data:{accepted:false,reason:"duplicate"}}`.
+- Trả `201 {data:{accepted:true,id}}`; trùng (cùng reporter, số, ngày UTC) trả `200 {data:{accepted:false,reason:"duplicate"}}`.
 - Lỗi: `400 invalid_json | invalid_request | invalid_phone | invalid_called_at`, `401 unauthorized`, `403 forbidden` (reporter bị cấm), `429 rate_limited`.
 
+**`DELETE /reports/:phone`:**
+- Xóa hẳn báo cáo của chính reporter đó cho số đó, nếu gửi trong 1 giờ qua; tính lại điểm. Sau khi rút có thể báo lại ngay.
+- `200 {data:{withdrawn:n}}`. Báo cáo cũ hơn 1 giờ: `409 withdraw_window_closed`. Chưa từng báo số đó: `200 {data:{withdrawn:0}}`.
+- Nếu người đó đã báo số này cả hôm nay lẫn một ngày trước, chỉ báo cáo trong 1 giờ qua bị xóa; báo cáo cũ vẫn được tính.
+- Lý do giới hạn 1 giờ: người dùng sửa bấm nhầm ngay sau khi báo, ít khi quay lại sửa báo cáo cũ.
+
 **`GET /lookup/:phone`:**
-- `recent_scam_reporters_24h`: số người khác nhau có phiếu mới nhất là `scam` gửi trong 24 giờ qua (reporter chưa bị cấm, báo cáo `active`). Tính trực tiếp khi tra cứu, không lưu, vì giá trị tự giảm theo thời gian. Chỉ để hiển thị (ví dụ "5 người đã báo cáo số này là lừa đảo trong 24 giờ qua"), **không** dùng trong công thức điểm. Có thể chậm tối đa 2 phút do cache.
+- `recent_scam_reporters_24h`: số người khác nhau có báo cáo mới nhất gửi trong 24 giờ qua (reporter chưa bị cấm, báo cáo `active`). Tính trực tiếp khi tra cứu, không lưu, vì giá trị tự giảm theo thời gian. Chỉ để hiển thị (ví dụ "5 người đã báo cáo số này là lừa đảo trong 24 giờ qua"), **không** dùng trong công thức điểm. Có thể chậm tối đa 2 phút do cache.
 
 **`GET /sync/numbers`:**
-- Không có `since`: mọi số `medium`/`high`, **và** mọi số có ít nhất 1 người báo lừa đảo (`unique_scam_reporters > 0`, kể cả `insufficient`/`low`), để app vẫn hiện chỉ báo khi offline. Số chỉ có báo cáo `safe`/`spam`/`unknown` không có trong danh sách.
+- Không có `since`: mọi số `medium`/`high`, **và** mọi số có ít nhất 1 người báo lừa đảo (`unique_scam_reporters > 0`, kể cả `insufficient`/`low`), để app vẫn hiện chỉ báo khi offline.
 - Có `since` (Unix giây): mọi số có `updated_at >= since`, **kể cả số không còn thỏa điều kiện trên**. App giữ một số trên máy khi `risk_level` là `medium`/`high` hoặc `unique_scam_reporters > 0`; ngược lại thì xóa.
 - Không có `recent_scam_reporters_24h` (danh sách offline đồng bộ mỗi 6 giờ nên số này sẽ cũ). App lấy giá trị này từ tra cứu online khi có cuộc gọi đến.
 - Kích thước danh sách chưa tối ưu: chấp nhận lớn hơn để đủ thông tin khi offline, sẽ tối ưu sau khi có dữ liệu thật.
@@ -202,11 +208,7 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
     "is_foreign": false,
     "risk_level": "high",
     "total_reports": 128,
-    "scam_reports": 117,
-    "spam_reports": 4,
-    "safe_reports": 2,
-    "unique_reporters": 96,
-    "unique_scam_reporters": 90,
+    "unique_scam_reporters": 96,
     "recent_scam_reporters_24h": 5,
     "top_scenarios": [{"key": "fake_police", "count": 71}, {"key": "investment", "count": 22}],
     "first_reported_at": "2026-10-01T03:12:00Z",
@@ -223,7 +225,7 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
   - Theo IP (binding, mỗi 60 giây): `/install` 5, `/reports` 20, `/lookup` 120. IP chỉ dùng trong bộ nhớ làm khóa, không lưu.
   - Theo reporter (đếm trong D1, chính xác): `REPORTS_PER_HOUR_PER_REPORTER` = 10 báo cáo/giờ.
 - **Dedupe:** 1 phiếu/số/reporter/24h. Khi tính điểm, mỗi reporter chỉ tính phiếu mới nhất cho một số.
-- **Phát hiện bất thường (cron):** nhiều reporter mới cùng gắn `safe` cho một số trong thời gian ngắn; một reporter báo hàng loạt số liên tiếp; nhiều tài khoản tạo gần nhau cùng bỏ phiếu cho các số giống nhau. Không dùng IP (không được lưu). Khi phát hiện, báo cáo bị đặt `hidden` và trust score bị hạ.
+- **Phát hiện bất thường (cron):** nhiều reporter mới cùng báo một số trong thời gian ngắn; một reporter báo hàng loạt số liên tiếp; nhiều tài khoản tạo gần nhau cùng bỏ phiếu cho các số giống nhau. Không dùng IP (không được lưu). Khi phát hiện, báo cáo bị đặt `hidden` và trust score bị hạ.
 - **Android:** chỉ cho báo cáo nhanh số vừa gọi đến (nhận biết qua `CallScreeningService`); báo cáo từ nguồn này có trọng số khởi đầu cao hơn.
 - **Lọc note (`sanitizeNote()`):** bỏ ký tự điều khiển và vô hình; thay email và mọi dãy từ 6 chữ số trở lên (cho phép dấu cách/chấm/phẩy/gạch xen giữa) bằng `[đã ẩn]`, trừ khi ngay sau là đơn vị tiền (`đ`, `đồng`, `VND`, `VNĐ`); cắt còn 280 ký tự sau khi lọc.
 
@@ -243,7 +245,7 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
 - `CallScreeningService` luôn trả `CallResponse` cho phép cuộc gọi, trong vòng 5 giây (máy chưa đổ chuông cho đến khi có phản hồi). Tra cục bộ trước (Room DB đồng bộ từ `/sync/numbers`), sau đó tra online với timeout 1 giây.
 - Chỉ báo hiển thị từ `onScreenCall(...)`: tài liệu Android hướng dẫn app caller ID mở activity để hiện thông tin. Cách hiển thị cụ thể trên màn hình cuộc gọi đến (activity, thông báo) **chưa thử trên máy thật**.
 - Nội dung chỉ báo theo ngôn từ trung lập, ví dụ "96 người đã báo cáo số này là lừa đảo", kèm ghi chú số liệu chỉ phản ánh báo cáo của cộng đồng.
-- Sau cuộc gọi từ số không có trong danh bạ, hiện thông báo báo cáo nhanh với các nút nhãn.
+- Sau cuộc gọi từ số không có trong danh bạ, hiện thông báo "Báo cáo lừa đảo?" với một nút; sau khi báo có nút "Hoàn tác" trong 1 giờ.
 - WorkManager đồng bộ danh sách mỗi 6 giờ.
 
 **iOS (Swift):**

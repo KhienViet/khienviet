@@ -1,6 +1,6 @@
 # PLAN — Khiên Việt (khienviet.net)
 
-Dự án cộng đồng, phi lợi nhuận, mã nguồn mở. Người dùng ghi nhận các cuộc gọi lạ và gắn nhãn (lừa đảo / làm phiền / an toàn), từ đó cộng đồng biết một số điện thoại đã gọi bao nhiêu cuộc được ghi nhận và bao nhiêu cuộc bị báo lừa đảo.
+Dự án cộng đồng, phi lợi nhuận, mã nguồn mở. Người dùng báo cáo một chạm các cuộc gọi lừa đảo (chỉ một loại báo cáo, rút lại được trong 1 giờ), từ đó cộng đồng biết bao nhiêu người đã báo một số điện thoại là lừa đảo.
 
 ## 1. Mục tiêu
 
@@ -81,7 +81,8 @@ Dự án cộng đồng, phi lợi nhuận, mã nguồn mở. Người dùng ghi
 
 | Rủi ro | Giảm thiểu |
 |---|---|
-| Kẻ lừa đảo spam nhãn "an toàn" để làm sạch số | Tính theo người báo độc lập, trọng số uy tín, phát hiện báo cáo dồn dập |
+| Không có nhãn "an toàn" để phản bác báo cáo sai | Khiếu nại của chủ thuê bao, rút báo cáo trong 1 giờ, phát hiện bất thường, giảm trọng số theo thời gian |
+| Báo cáo dồn dập từ tài khoản giả để bôi nhọ một số | Thời gian làm quen 3 ngày, tối thiểu 5 người có tài khoản cũ cho mức cao, phát hiện bất thường |
 | Báo cáo sai, gây oan cho số hợp pháp | Ngưỡng tối thiểu, ngôn từ trung lập, khiếu nại, giảm trọng số theo thời gian |
 | Bị DDoS | Cloudflare proxy, cache edge, rate limit, không có server gốc |
 | Người vận hành bị lộ danh tính hoặc bị đe dọa | Tách biệt tài khoản, WHOIS ẩn, đứng tên nhóm, hạn chế người biết |

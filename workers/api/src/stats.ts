@@ -1,18 +1,14 @@
-import { configFromEnv, scoreVotes, type Label, type Vote } from './scoring';
+import { configFromEnv, scoreVotes, type Vote } from './scoring';
 
 const TOP_SCENARIOS = 3;
 
 interface VoteRow {
-  label: Label;
   created_at: number;
   trust_score: number;
   reporter_created_at: number;
 }
 interface CountRow {
   total: number;
-  scam: number;
-  spam: number;
-  safe: number;
   first_at: number | null;
   last_at: number | null;
 }
@@ -20,6 +16,9 @@ interface ScenarioRow {
   scenario: string;
   count: number;
 }
+
+// Chỉ tính dòng nhãn `scam`. API chỉ ghi nhãn này; dòng nhãn khác (dữ liệu cũ hoặc seed) bị bỏ qua.
+const COUNTED = `r.phone = ?1 AND r.label = 'scam' AND r.status = 'active' AND rep.banned = 0`;
 
 /**
  * Tính lại phone_stats cho một số từ các báo cáo `active` của reporter chưa bị cấm.
@@ -31,33 +30,28 @@ export async function recomputePhoneStats(env: Env, phone: string, now: number):
 
   const [votesRes, countsRes, scenariosRes, existing] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT label, created_at, trust_score, reporter_created_at FROM (
-         SELECT r.label, r.created_at, rep.trust_score, rep.created_at AS reporter_created_at,
+      `SELECT created_at, trust_score, reporter_created_at FROM (
+         SELECT r.created_at, rep.trust_score, rep.created_at AS reporter_created_at,
                 ROW_NUMBER() OVER (PARTITION BY r.reporter_id ORDER BY r.created_at DESC, r.rowid DESC) AS rn
          FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
-         WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0
+         WHERE ${COUNTED}
        ) WHERE rn = 1`,
     ).bind(phone),
     env.DB.prepare(
-      `SELECT COUNT(*) AS total,
-              COALESCE(SUM(r.label = 'scam'), 0) AS scam,
-              COALESCE(SUM(r.label = 'spam'), 0) AS spam,
-              COALESCE(SUM(r.label = 'safe'), 0) AS safe,
-              MIN(r.created_at) AS first_at, MAX(r.created_at) AS last_at
+      `SELECT COUNT(*) AS total, MIN(r.created_at) AS first_at, MAX(r.created_at) AS last_at
        FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
-       WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0`,
+       WHERE ${COUNTED}`,
     ).bind(phone),
     env.DB.prepare(
       `SELECT r.scenario AS scenario, COUNT(*) AS count
        FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
-       WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0 AND r.scenario IS NOT NULL
+       WHERE ${COUNTED} AND r.scenario IS NOT NULL
        GROUP BY r.scenario ORDER BY count DESC, r.scenario LIMIT ?2`,
     ).bind(phone, TOP_SCENARIOS),
     env.DB.prepare(`SELECT under_review FROM phone_stats WHERE phone = ?1`).bind(phone),
   ]);
 
   const votes: Vote[] = (votesRes!.results as unknown as VoteRow[]).map((r) => ({
-    label: r.label,
     createdAt: r.created_at,
     trust: r.trust_score,
     reporterCreatedAt: r.reporter_created_at,
@@ -94,11 +88,11 @@ export async function recomputePhoneStats(env: Env, phone: string, now: number):
     .bind(
       phone,
       counts.total,
-      counts.scam,
-      counts.spam,
-      counts.safe,
+      counts.total, // scam_reports: mọi báo cáo được tính đều là lừa đảo
+      0, // spam_reports, safe_reports: cột cũ, không còn dùng (không sửa migration đã áp dụng)
+      0,
       s.uniqueReporters,
-      s.uniqueScamReporters,
+      s.uniqueReporters, // unique_scam_reporters
       s.score,
       s.riskLevel,
       JSON.stringify(scenarios.map((r) => ({ key: r.scenario, count: r.count }))),

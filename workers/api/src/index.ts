@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { normalizePhone } from '@khienviet/phone';
 import { findReporter, generateToken, hashToken, type Reporter } from './auth';
 import { sanitizeNote } from './sanitize';
-import { LABELS, type RiskLevel } from './scoring';
+import type { RiskLevel } from './scoring';
 import { recomputeDecaying, recomputePhoneStats } from './stats';
 
 // Danh sách kịch bản lừa đảo. Thêm mới ở đây và trong docs/ARCHITECTURE.md mục 5.
@@ -24,7 +24,7 @@ const app = new Hono<AppEnv>().basePath('/api/v1');
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const iso = (sec: number | null) => (sec === null ? null : new Date(sec * 1000).toISOString().replace('.000Z', 'Z'));
-const fail = (c: Context, status: 400 | 401 | 403 | 404 | 429 | 500, code: string, message: string) =>
+const fail = (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429 | 500, code: string, message: string) =>
   c.json({ error: { code, message } }, status);
 
 // IP chỉ dùng trong bộ nhớ làm khóa rate limit, không bao giờ lưu hay log.
@@ -58,7 +58,6 @@ const requireInstall = async (c: Context<AppEnv>, next: () => Promise<void>) => 
 
 const reportSchema = z.strictObject({
   phone: z.string().min(1).max(40),
-  label: z.enum(LABELS),
   scenario: z.enum(SCENARIOS).optional(),
   note: z.string().max(2000).optional(),
   called_at: z.iso.datetime({ offset: true }).optional(),
@@ -109,14 +108,14 @@ app.post('/reports', requireInstall, async (c) => {
   const note = input.note === undefined ? null : sanitizeNote(input.note);
   const res = await c.env.DB.prepare(
     `INSERT INTO reports (id, phone, reporter_id, label, scenario, note, source, called_at, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+     VALUES (?1, ?2, ?3, 'scam', ?4, ?5, ?6, ?7, ?8)
      ON CONFLICT DO NOTHING`,
   )
-    .bind(id, phone.e164, reporter.id, input.label, input.scenario ?? null, note, input.source, calledAt, now)
+    .bind(id, phone.e164, reporter.id, input.scenario ?? null, note, input.source, calledAt, now)
     .run();
 
   if (res.meta.changes === 0) {
-    // Cùng reporter, cùng số, cùng nhãn trong cùng ngày: không tính thêm.
+    // Cùng reporter, cùng số trong cùng ngày (UTC): không tính thêm.
     return c.json({ data: { accepted: false, reason: 'duplicate' } }, 200);
   }
 
@@ -125,14 +124,39 @@ app.post('/reports', requireInstall, async (c) => {
   return c.json({ data: { accepted: true, id } }, 201);
 });
 
+// ---------- DELETE /reports/:phone ----------
+// Rút báo cáo của chính mình cho một số, chỉ trong WITHDRAW_WINDOW sau khi gửi (để sửa bấm nhầm).
+// Xóa hẳn dòng đó để có thể báo lại trong cùng ngày (chỉ mục chống trùng tính cả dòng đã ẩn).
+// Báo cáo cũ hơn không rút được: chỉ hết hiệu lực dần theo thời gian hoặc qua khiếu nại.
+const WITHDRAW_WINDOW = 3600;
+
+app.delete('/reports/:phone', requireInstall, async (c) => {
+  if (!(await underLimit(c.env.WRITE_LIMITER, clientKey(c)))) {
+    return fail(c, 429, 'rate_limited', 'Quá nhiều yêu cầu, vui lòng thử lại sau.');
+  }
+  const phone = normalizePhone(c.req.param('phone') ?? '');
+  if (!phone) return fail(c, 400, 'invalid_phone', 'Số điện thoại không hợp lệ.');
+  const reporterId = c.get('reporter').id;
+  const now = nowSec();
+  const res = await c.env.DB.prepare(`DELETE FROM reports WHERE reporter_id = ?1 AND phone = ?2 AND created_at > ?3`)
+    .bind(reporterId, phone.e164, now - WITHDRAW_WINDOW)
+    .run();
+  const withdrawn = res.meta.changes;
+  if (withdrawn > 0) {
+    await recomputePhoneStats(c.env, phone.e164, now);
+    return c.json({ data: { withdrawn } }, 200);
+  }
+  const older = await c.env.DB.prepare(`SELECT 1 FROM reports WHERE reporter_id = ?1 AND phone = ?2 LIMIT 1`)
+    .bind(reporterId, phone.e164)
+    .first();
+  if (older) return fail(c, 409, 'withdraw_window_closed', 'Chỉ rút được báo cáo trong vòng 1 giờ sau khi gửi.');
+  return c.json({ data: { withdrawn: 0 } }, 200);
+});
+
 // ---------- GET /lookup/:phone ----------
 interface StatsRow {
   phone: string;
   total_reports: number;
-  scam_reports: number;
-  spam_reports: number;
-  safe_reports: number;
-  unique_reporters: number;
   unique_scam_reporters: number;
   risk_level: RiskLevel;
   top_scenarios: string | null;
@@ -153,15 +177,15 @@ app.get('/lookup/:phone', async (c) => {
   const now = nowSec();
   const [statsRes, recentRes] = await c.env.DB.batch([
     c.env.DB.prepare(`SELECT * FROM phone_stats WHERE phone = ?1`).bind(phone.e164),
-    // Số người khác nhau có phiếu mới nhất là `scam` và được gửi trong 24 giờ qua.
+    // Số người khác nhau có báo cáo mới nhất gửi trong 24 giờ qua.
     // Tính trực tiếp (không lưu) vì giá trị tự giảm theo thời gian mà không cần báo cáo mới.
     c.env.DB.prepare(
       `SELECT COUNT(*) AS n FROM (
-         SELECT r.label, r.created_at,
+         SELECT r.created_at,
                 ROW_NUMBER() OVER (PARTITION BY r.reporter_id ORDER BY r.created_at DESC, r.rowid DESC) AS rn
          FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
-         WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0
-       ) WHERE rn = 1 AND label = 'scam' AND created_at > ?2`,
+         WHERE r.phone = ?1 AND r.label = 'scam' AND r.status = 'active' AND rep.banned = 0
+       ) WHERE rn = 1 AND created_at > ?2`,
     ).bind(phone.e164, now - RECENT_WINDOW),
   ]);
   const row = statsRes!.results[0] as StatsRow | undefined;
@@ -173,10 +197,6 @@ app.get('/lookup/:phone', async (c) => {
       is_foreign: phone.isForeign,
       risk_level: row?.risk_level ?? 'insufficient',
       total_reports: row?.total_reports ?? 0,
-      scam_reports: row?.scam_reports ?? 0,
-      spam_reports: row?.spam_reports ?? 0,
-      safe_reports: row?.safe_reports ?? 0,
-      unique_reporters: row?.unique_reporters ?? 0,
       unique_scam_reporters: row?.unique_scam_reporters ?? 0,
       recent_scam_reporters_24h: recent,
       top_scenarios: row?.top_scenarios ? (JSON.parse(row.top_scenarios) as unknown) : [],
