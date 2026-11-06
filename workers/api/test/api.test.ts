@@ -256,15 +256,15 @@ describe('reporting and lookup', () => {
   });
 });
 
-describe('GET /sync/blocklist', () => {
+describe('GET /sync/numbers', () => {
   it('requires an install token', async () => {
-    expect((await call('/sync/blocklist')).status).toBe(401);
+    expect((await call('/sync/numbers')).status).toBe(401);
   });
 
   it('full sync lists only medium/high; delta includes downgrades; cursor pages through', async () => {
     const reader = await install();
     const auth = { headers: { Authorization: `Bearer ${reader}` } };
-    const before = (await call('/sync/blocklist', auth)).body.data.items.length;
+    const before = (await call('/sync/numbers', auth)).body.data.items.length;
 
     // 3 số high mới, 1 số chỉ có 1 người báo (insufficient).
     const highs = [freshPhone(), freshPhone(), freshPhone()];
@@ -275,7 +275,7 @@ describe('GET /sync/blocklist', () => {
     const lone = freshPhone();
     await report(await install(), { phone: lone, label: 'scam' });
 
-    const full = (await call('/sync/blocklist', auth)).body.data;
+    const full = (await call('/sync/numbers', auth)).body.data;
     const phones = full.items.map((i: any) => i.phone);
     expect(phones.length - before).toBe(3);
     for (const p of highs) expect(phones).toContain(`+84${p.slice(1)}`);
@@ -287,7 +287,7 @@ describe('GET /sync/blocklist', () => {
     let cursor: string | null = null;
     do {
       const q: string = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-      const page: any = (await call(`/sync/blocklist?limit=1${q}`, auth)).body.data;
+      const page: any = (await call(`/sync/numbers?limit=1${q}`, auth)).body.data;
       seen.push(...page.items.map((i: any) => i.phone));
       cursor = page.next_cursor;
     } while (cursor);
@@ -298,13 +298,13 @@ describe('GET /sync/blocklist', () => {
     const e164 = `+84${highs[0]!.slice(1)}`;
     await env.DB.prepare(`UPDATE reports SET status = 'hidden' WHERE phone = ?1`).bind(e164).run();
     await recomputePhoneStats(env, e164, since + 5);
-    const delta = (await call(`/sync/blocklist?since=${since}`, auth)).body.data.items;
+    const delta = (await call(`/sync/numbers?since=${since}`, auth)).body.data.items;
     expect(delta).toContainEqual(expect.objectContaining({ phone: e164, risk_level: 'insufficient' }));
   });
 
   it.each(['since=abc', 'cursor=bad', 'limit=0', 'limit=1001', 'limit=1.5'])('rejects %s', async (q) => {
     const t = await install();
-    const r = await call(`/sync/blocklist?${q}`, { headers: { Authorization: `Bearer ${t}` } });
+    const r = await call(`/sync/numbers?${q}`, { headers: { Authorization: `Bearer ${t}` } });
     expect(r.status).toBe(400);
   });
 });

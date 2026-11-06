@@ -84,7 +84,7 @@ export function configFromEnv(env: { [K in keyof ThresholdVars]: string }): Scor
  * scam_ratio = Σ w(phiếu scam) / Σ w(mọi phiếu)
  * Mức `high` còn cần đủ HIGH_MIN_SCAM_REPORTERS người báo lừa đảo có tài khoản đã qua thời gian làm quen.
  * Nếu số đang có khiếu nại (underReview), mức `high` bị hạ xuống `medium`:
- * giao diện hiển thị "Đang xem xét", và app không tự động chặn.
+ * giao diện và app hiển thị "Đang xem xét" thay cho cảnh báo mức cao.
  */
 export function scoreVotes(votes: Vote[], now: number, underReview: boolean, cfg: ScoringConfig): ScoreResult {
   let score = 0;

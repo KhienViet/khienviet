@@ -28,7 +28,7 @@ flowchart LR
 | Chống bot | Turnstile + Rate Limiting binding | Bảo vệ endpoint ghi |
 | Tác vụ định kỳ | Cron Triggers | Tính lại điểm theo thời gian, xuất danh sách sync |
 | Android | Kotlin, `CallScreeningService` | Cảnh báo cuộc gọi đến, báo cáo sau cuộc gọi |
-| iOS | Swift, Call Directory Extension | Gắn nhãn / chặn từ danh sách offline |
+| iOS | Swift, Call Directory Extension | Gắn nhãn từ danh sách offline (không chặn) |
 
 ## 2. Chuẩn hóa số điện thoại
 
@@ -150,7 +150,7 @@ Phân loại mức nguy cơ:
 
 `unique_scam_reporters` hiển thị cho người dùng vẫn đếm mọi người báo lừa đảo, kể cả tài khoản mới.
 
-Nếu `under_review = 1`, mức `high` bị hạ thành `medium`: giao diện hiển thị "Đang xem xét khiếu nại" kèm số liệu thô, và app không tự động chặn số đó (chỉ chặn `high`).
+Nếu `under_review = 1`, mức `high` bị hạ thành `medium`: giao diện và app hiển thị "Đang xem xét khiếu nại" kèm số liệu thô, không hiện cảnh báo mức cao.
 
 **Điểm yếu còn lại:** nhiều tài khoản có trust bình thường cùng báo `safe` vẫn hạ được mức của một số (6 scam + 7 safe, cùng trust 1.0, cho `score` = -1). Công thức không chặn được việc này; phải dựa vào phát hiện bất thường (mục 6) để hạ trust các tài khoản đó.
 
@@ -168,7 +168,7 @@ Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpo
 | POST | `/install` | rate limit theo IP | Tạo install token ẩn danh, trả về **một lần**: `{data:{token}}` | ✅ |
 | POST | `/reports` | install token | Gửi báo cáo `{phone, label, source, scenario?, note?, called_at?}` | ✅ |
 | GET | `/lookup/:phone` | — (rate limit theo IP) | Tra cứu một số. `Cache-Control: public, max-age=120` | ✅ |
-| GET | `/sync/blocklist?since=&cursor=&limit=` | install token | Danh sách cho app, phân trang và delta | ✅ |
+| GET | `/sync/numbers?since=&cursor=&limit=` | install token | Danh sách cho app, phân trang và delta | ✅ |
 | GET | `/stats/summary` | — | Thống kê tổng | chưa làm |
 | GET | `/stats/top?period=7d` | — | Số bị báo nhiều nhất (**số đã che một phần**) | chưa làm |
 | POST | `/disputes` | Turnstile | Gửi khiếu nại | chưa làm |
@@ -181,7 +181,7 @@ Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpo
 - Trả `201 {data:{accepted:true,id}}`; trùng (cùng reporter, số, nhãn, ngày UTC) trả `200 {data:{accepted:false,reason:"duplicate"}}`.
 - Lỗi: `400 invalid_json | invalid_request | invalid_phone | invalid_called_at`, `401 unauthorized`, `403 forbidden` (reporter bị cấm), `429 rate_limited`.
 
-**`GET /sync/blocklist`:**
+**`GET /sync/numbers`:**
 - Không có `since`: mọi số `medium`/`high`.
 - Có `since` (Unix giây): mọi số có `updated_at >= since`, **kể cả số đã xuống `low`/`insufficient`**, để app xóa khỏi danh sách trên máy.
 - `limit` 1–1000 (mặc định 1000); trang tiếp theo dùng `next_cursor` (null khi hết).
@@ -233,8 +233,10 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
 ## 8. App di động
 
 **Android (Kotlin):**
-- `CallScreeningService` tra cứu cục bộ (Room DB đồng bộ từ `/sync/blocklist`), sau đó tra online với timeout 1 giây.
-- Hiện overlay hoặc thông báo mức nguy cơ; tùy chọn tự động từ chối cuộc gọi `high`.
+- **App không bao giờ chặn, từ chối hay tắt chuông cuộc gọi**, ở mọi mức nguy cơ. App chỉ hiện chỉ báo để người nghe tự quyết định. Lý do: số liệu là báo cáo của cộng đồng, có thể sai hoặc bị thao túng; người dùng có thể lỡ cuộc gọi thật (shipper, ngân hàng, bệnh viện).
+- `CallScreeningService` luôn trả `CallResponse` cho phép cuộc gọi, trong vòng 5 giây (máy chưa đổ chuông cho đến khi có phản hồi). Tra cục bộ trước (Room DB đồng bộ từ `/sync/numbers`), sau đó tra online với timeout 1 giây.
+- Chỉ báo hiển thị từ `onScreenCall(...)`: tài liệu Android hướng dẫn app caller ID mở activity để hiện thông tin. Cách hiển thị cụ thể trên màn hình cuộc gọi đến (activity, thông báo) **chưa thử trên máy thật**.
+- Nội dung chỉ báo theo ngôn từ trung lập, ví dụ "96 người đã báo cáo số này là lừa đảo", kèm ghi chú số liệu chỉ phản ánh báo cáo của cộng đồng.
 - Sau cuộc gọi từ số không có trong danh bạ, hiện thông báo báo cáo nhanh với các nút nhãn.
 - WorkManager đồng bộ danh sách mỗi 6 giờ.
 

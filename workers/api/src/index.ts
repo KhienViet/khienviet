@@ -169,13 +169,13 @@ app.get('/lookup/:phone', async (c) => {
   });
 });
 
-// ---------- GET /sync/blocklist?since=<epoch>&cursor=<opaque>&limit=<1..1000> ----------
+// ---------- GET /sync/numbers?since=<epoch>&cursor=<opaque>&limit=<1..1000> ----------
 // Không có `since`: toàn bộ số medium/high. Có `since`: mọi số thay đổi từ thời điểm đó
 // (kể cả số đã xuống low/insufficient, để app xóa khỏi danh sách trên máy).
 const SYNC_PAGE_MAX = 1000;
 const CURSOR = /^(\d{1,12})_(\+\d{8,15})$/;
 
-app.get('/sync/blocklist', requireInstall, async (c) => {
+app.get('/sync/numbers', requireInstall, async (c) => {
   const sinceRaw = c.req.query('since');
   const cursorRaw = c.req.query('cursor');
   const limitRaw = c.req.query('limit');
