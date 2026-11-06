@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Chặn push nếu commit sắp đẩy lên có secret, sai danh tính, hoặc chứa thông tin cá nhân.
+# Bật một lần cho mỗi bản clone:  git config core.hooksPath .githooks
+# Bỏ qua (chỉ khi chắc chắn):     git push --no-verify
+set -euo pipefail
+
+zero=0000000000000000000000000000000000000000
+remote="$1"
+fail=0
+
+command -v gitleaks >/dev/null 2>&1 || {
+  echo "pre-push: chưa cài gitleaks (brew install gitleaks). Dừng push." >&2
+  exit 1
+}
+
+# Danh sách mẫu riêng của từng máy, nằm trong .git/ nên không bao giờ bị commit.
+# Mỗi dòng một biểu thức chính quy (ERE), ví dụ tên thật, email, đường dẫn home.
+denylist="$(git rev-parse --git-dir)/push-denylist"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # xóa nhánh: không có gì để quét
+
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha --not --remotes=$remote"   # nhánh mới: chỉ commit chưa có trên remote
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  commits=$(git rev-list $range)
+  [ -z "$commits" ] && continue
+
+  # 1. Secret
+  if ! gitleaks git --log-opts="$range" --redact --no-banner --log-level warn .; then
+    echo "pre-push: gitleaks phát hiện secret trong $local_ref." >&2
+    fail=1
+  fi
+
+  # 2. Danh tính: tác giả và người commit phải dùng địa chỉ noreply của GitHub.
+  bad=$(git log --format='%h %ae %ce' $range | awk '$2 !~ /@users\.noreply\.github\.com$/ || $3 !~ /@users\.noreply\.github\.com$/')
+  if [ -n "$bad" ]; then
+    echo "pre-push: commit không dùng email noreply của GitHub:" >&2
+    echo "$bad" >&2
+    echo "  Sửa: git config user.email '<id>+<user>@users.noreply.github.com' rồi amend/rebase." >&2
+    fail=1
+  fi
+
+  # 3. Thông tin cá nhân (tùy chọn, theo danh sách riêng của máy).
+  if [ -s "$denylist" ]; then
+    pattern=$(grep -v -E '^\s*(#|$)' "$denylist" | paste -sd '|' -)
+    if [ -n "$pattern" ]; then
+      # Dòng được thêm trong các commit, cùng metadata của commit.
+      hits=$(git log -p --format='%H%n%an %ae%n%cn %ce%n%B' $range | grep -n -i -E "$pattern" | grep -v -E '^[0-9]+:-' || true)
+      if [ -n "$hits" ]; then
+        echo "pre-push: khớp danh sách thông tin cá nhân ($denylist), $(echo "$hits" | wc -l | tr -d ' ') dòng." >&2
+        echo "  Xem: git log -p $range | grep -n -i -E -f <(grep -v -E '^\\s*(#|\$)' $denylist)" >&2
+        fail=1
+      fi
+    fi
+  fi
+done
+
+exit $fail
