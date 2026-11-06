@@ -9,11 +9,19 @@ const cfg = configFromEnv({
   RATIO_MEDIUM: '0.3',
   RATIO_HIGH: '0.7',
   HIGH_MIN_SCAM_REPORTERS: '5',
+  WARMUP_DAYS: '3',
+  WARMUP_WEIGHT: '0.5',
 });
 const NOW = 1_800_000_000;
 const DAY = 86_400;
-const votes = (n: number, label: Label, ageDays = 0, trust = 1): Vote[] =>
-  Array.from({ length: n }, () => ({ label, createdAt: NOW - ageDays * DAY, trust }));
+// accountAgeDays: tuổi tài khoản tính đến NOW. Mặc định 1 năm (đã qua thời gian làm quen).
+const votes = (n: number, label: Label, ageDays = 0, trust = 1, accountAgeDays = 365): Vote[] =>
+  Array.from({ length: n }, () => ({
+    label,
+    createdAt: NOW - ageDays * DAY,
+    trust,
+    reporterCreatedAt: NOW - Math.max(ageDays, accountAgeDays) * DAY,
+  }));
 
 describe('scoreVotes', () => {
   it('below the reporter threshold is insufficient, however strong the votes', () => {
@@ -50,7 +58,7 @@ describe('scoreVotes', () => {
   });
 
   it('a vote dated in the future (clock skew) counts as fresh, not heavier', () => {
-    const r = scoreVotes([{ label: 'scam', createdAt: NOW + 10 * DAY, trust: 1 }], NOW, false, cfg);
+    const r = scoreVotes([{ label: 'scam', createdAt: NOW + 10 * DAY, trust: 1, reporterCreatedAt: NOW - 365 * DAY }], NOW, false, cfg);
     expect(r.score).toBe(1);
   });
 
@@ -71,14 +79,54 @@ describe('scoreVotes', () => {
       expect(r.score).toBeCloseTo(4, 10);
     });
 
-    it('... but still drop the unweighted scam_ratio: KNOWN WEAKNESS of the published formula', () => {
+    it('... and no longer drop scam_ratio, which is weighted the same way as the score', () => {
       // 6 người báo lừa đảo (trust 1.0) + 20 tài khoản bị hạ trust 0.1 báo "an toàn".
-      // scam_ratio = 6/26 = 0.23 < 0.3 → low, dù trust của nhóm "an toàn" đã bị hạ.
-      // Test này ghi lại hành vi hiện tại của công thức đã công bố; đổi công thức cần quyết định
-      // của người vận hành và cập nhật docs/ARCHITECTURE.md mục 4.
+      // Tỷ lệ theo người sẽ là 6/26 = 0.23 → low. Theo trọng số: 6 / (6 + 20 × 0.1) = 0.75 → high.
       const r = scoreVotes([...votes(6, 'scam'), ...votes(20, 'safe', 0, 0.1)], NOW, false, cfg);
-      expect(r.scamRatio).toBeCloseTo(6 / 26, 10);
-      expect(r.riskLevel).toBe('low');
+      expect(r.scamRatio).toBeCloseTo(0.75, 10);
+      expect(r.riskLevel).toBe('high');
+    });
+  });
+
+  it('scam_ratio is time-weighted: old votes count less in the ratio too', () => {
+    // 5 scam mới + 5 safe cách đây 90 ngày (trọng số 0.125): 5 / (5 + 0.625)
+    const r = scoreVotes([...votes(5, 'scam'), ...votes(5, 'safe', 90)], NOW, false, cfg);
+    expect(r.scamRatio).toBeCloseTo(5 / 5.625, 10);
+  });
+
+  describe('warm-up period for new accounts', () => {
+    it('votes from accounts younger than 3 days count half', () => {
+      expect(scoreVotes(votes(1, 'scam', 0, 1, 1), NOW, false, cfg).score).toBeCloseTo(0.5, 10);
+      expect(scoreVotes(votes(1, 'scam', 0, 1, 3), NOW, false, cfg).score).toBeCloseTo(1, 10);
+    });
+
+    it('a vote cast on install day gains full weight once the account is 3 days old', () => {
+      // Người dùng thật thường cài app rồi báo ngay. Phiếu đó không bị giảm mãi.
+      const v: Vote = { label: 'scam', createdAt: NOW, trust: 1, reporterCreatedAt: NOW };
+      expect(scoreVotes([v], NOW + DAY, false, cfg).score).toBeCloseTo(0.5 * Math.pow(0.5, 1 / 30), 10);
+      expect(scoreVotes([v], NOW + 3 * DAY, false, cfg).score).toBeCloseTo(Math.pow(0.5, 3 / 30), 10);
+    });
+
+    it('new accounts alone cannot reach high, however many', () => {
+      // 20 tài khoản mới: score 10, tỷ lệ 1.0, nhưng 0 người báo đã qua làm quen → medium.
+      const r = scoreVotes(votes(20, 'scam', 0, 1, 0), NOW, false, cfg);
+      expect(r.score).toBeCloseTo(10, 10);
+      expect(r.uniqueScamReporters).toBe(20);
+      expect(r.establishedScamReporters).toBe(0);
+      expect(r.riskLevel).toBe('medium');
+    });
+
+    it('high needs 5 established scam reporters; new ones add to the score', () => {
+      const four = [...votes(4, 'scam'), ...votes(3, 'scam', 0, 1, 0)];
+      expect(scoreVotes(four, NOW, false, cfg).riskLevel).toBe('medium');
+      const five = [...votes(5, 'scam'), ...votes(3, 'scam', 0, 1, 0)];
+      expect(scoreVotes(five, NOW, false, cfg).riskLevel).toBe('high');
+    });
+
+    it('new accounts flooding `safe` move the ratio only at half weight', () => {
+      // 6 scam + 9 safe mới: 6 / (6 + 4.5) = 0.57 ≥ 0.3, score 1.5 → medium (không về low).
+      const r = scoreVotes([...votes(6, 'scam'), ...votes(9, 'safe', 0, 1, 0)], NOW, false, cfg);
+      expect(r.riskLevel).toBe('medium');
     });
   });
 });
@@ -93,9 +141,13 @@ describe('configFromEnv', () => {
       RATIO_MEDIUM: '0.3',
       RATIO_HIGH: '0.7',
       HIGH_MIN_SCAM_REPORTERS: '5',
+      WARMUP_DAYS: '3',
+      WARMUP_WEIGHT: '0.5',
     };
     expect(() => configFromEnv({ ...base, SCORE_HIGH: '' })).toThrow(/SCORE_HIGH/);
     expect(() => configFromEnv({ ...base, RATIO_HIGH: 'abc' })).toThrow(/RATIO_HIGH/);
     expect(() => configFromEnv({ ...base, SCORE_MEDIUM: '-1' })).toThrow(/SCORE_MEDIUM/);
+    expect(() => configFromEnv({ ...base, WARMUP_WEIGHT: '1.5' })).toThrow(/WARMUP_WEIGHT/);
+    expect(() => configFromEnv({ ...base, WARMUP_DAYS: '' })).toThrow(/WARMUP_DAYS/);
   });
 });

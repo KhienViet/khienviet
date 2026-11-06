@@ -6,6 +6,7 @@ interface VoteRow {
   label: Label;
   created_at: number;
   trust_score: number;
+  reporter_created_at: number;
 }
 interface CountRow {
   total: number;
@@ -30,8 +31,8 @@ export async function recomputePhoneStats(env: Env, phone: string, now: number):
 
   const [votesRes, countsRes, scenariosRes, existing] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT label, created_at, trust_score FROM (
-         SELECT r.label, r.created_at, rep.trust_score,
+      `SELECT label, created_at, trust_score, reporter_created_at FROM (
+         SELECT r.label, r.created_at, rep.trust_score, rep.created_at AS reporter_created_at,
                 ROW_NUMBER() OVER (PARTITION BY r.reporter_id ORDER BY r.created_at DESC, r.rowid DESC) AS rn
          FROM reports r JOIN reporters rep ON rep.id = r.reporter_id
          WHERE r.phone = ?1 AND r.status = 'active' AND rep.banned = 0
@@ -59,6 +60,7 @@ export async function recomputePhoneStats(env: Env, phone: string, now: number):
     label: r.label,
     createdAt: r.created_at,
     trust: r.trust_score,
+    reporterCreatedAt: r.reporter_created_at,
   }));
   const counts = (countsRes!.results as unknown as CountRow[])[0]!;
   const scenarios = scenariosRes!.results as unknown as ScenarioRow[];

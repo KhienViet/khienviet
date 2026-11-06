@@ -119,15 +119,18 @@ Ghi chú:
 
 ## 4. Thuật toán điểm nguy cơ (công khai)
 
-Với mỗi báo cáo đang `active` của một số:
+Với mỗi phiếu được tính của một số (mỗi reporter một phiếu, xem bên dưới):
 
 ```
-w_time   = 0.5 ^ (tuổi_báo_cáo_ngày / 30)        // half-life 30 ngày
+w_time   = 0.5 ^ (tuổi_phiếu_ngày / 30)          // half-life 30 ngày
 w_trust  = reporters.trust_score                 // 0.1 .. 3.0
+w_warmup = 0.5 nếu tài khoản chưa đủ 3 ngày tuổi, ngược lại 1
+w        = w_time × w_trust × w_warmup
 v_label  = scam: +1.0 | spam: +0.3 | safe: -1.0 | unknown: 0
 
-score    = Σ (w_time × w_trust × v_label)        // mỗi reporter chỉ tính báo cáo mới nhất của họ cho số đó
-scam_ratio = unique_scam_reporters / unique_reporters
+score      = Σ (w × v_label)
+scam_ratio = Σ w (phiếu scam) / Σ w (mọi phiếu)
+established_scam_reporters = số người báo scam có tài khoản từ 3 ngày tuổi trở lên
 ```
 
 Phân loại mức nguy cơ:
@@ -137,17 +140,23 @@ Phân loại mức nguy cơ:
 | `insufficient` | `unique_reporters < 3` |
 | `low` | `score < 1.5` hoặc `scam_ratio < 0.3` |
 | `medium` | `score >= 1.5` và `scam_ratio >= 0.3` |
-| `high` | `score >= 4` và `scam_ratio >= 0.7` và `unique_scam_reporters >= 5` |
+| `high` | `score >= 4` và `scam_ratio >= 0.7` và `established_scam_reporters >= 5` |
 
 **Phiếu nào được tính:** chỉ báo cáo `active` của reporter chưa bị cấm (`banned = 0`). Mỗi reporter chỉ tính phiếu mới nhất cho một số (theo `created_at`, nếu trùng giây thì theo thứ tự ghi). Các số đếm thô (`total_reports`, `scam_reports`...) đếm mọi báo cáo `active` của reporter chưa bị cấm. Phiếu có thời điểm ở tương lai (lệch đồng hồ) được tính như phiếu mới, không nặng hơn.
 
+**Vì sao `scam_ratio` theo trọng số:** nếu tỷ lệ đếm theo người, hạ trust của tài khoản đáng ngờ không có tác dụng với tỷ lệ. Ví dụ 6 người báo lừa đảo + 20 tài khoản trust 0.1 báo an toàn: đếm theo người cho 6/26 = 0.23 (`low`), theo trọng số cho 6 / (6 + 2) = 0.75 (`high`). Tỷ lệ cũng giảm theo thời gian như `score`, nên phiếu cũ ảnh hưởng ít hơn phiếu mới ở cả hai.
+
+**Thời gian làm quen:** tài khoản mới tạo hàng loạt không thể đẩy một số lên `high` ngay. Tuổi tài khoản tính tại lúc tính điểm, không phải lúc bỏ phiếu: người dùng thật thường cài app rồi báo ngay sau một cuộc gọi, và phiếu đó được đủ trọng số khi tài khoản qua 3 ngày (cron tính lại mỗi 6 giờ). Kẻ tấn công chuẩn bị trước chỉ bị chậm 3 ngày; khoảng này dành cho phát hiện bất thường (mục 6). Hệ quả: trong 3 ngày đầu sau khi ra mắt, chưa số nào đạt `high` từ báo cáo của cộng đồng.
+
+`unique_scam_reporters` hiển thị cho người dùng vẫn đếm mọi người báo lừa đảo, kể cả tài khoản mới.
+
 Nếu `under_review = 1`, mức `high` bị hạ thành `medium`: giao diện hiển thị "Đang xem xét khiếu nại" kèm số liệu thô, và app không tự động chặn số đó (chỉ chặn `high`).
 
-**Điểm yếu đã biết:** `scam_ratio` đếm người báo, không theo trọng số uy tín. Vì vậy nhiều tài khoản đã bị hạ trust 0.1 cùng báo `safe` vẫn kéo tỷ lệ xuống: ví dụ 6 người báo lừa đảo + 20 tài khoản trust 0.1 báo an toàn cho `score` = 4 nhưng `scam_ratio` = 0.23, nên mức là `low`. Test `scoring.test.ts` ghi lại hành vi này. Phương án đang cân nhắc: tính `scam_ratio` theo trọng số `w_time × w_trust`.
+**Điểm yếu còn lại:** nhiều tài khoản có trust bình thường cùng báo `safe` vẫn hạ được mức của một số (6 scam + 7 safe, cùng trust 1.0, cho `score` = -1). Công thức không chặn được việc này; phải dựa vào phát hiện bất thường (mục 6) để hạ trust các tài khoản đó.
 
-Các ngưỡng là tham số cấu hình (`wrangler.toml` vars) và sẽ được hiệu chỉnh khi có dữ liệu thật.
+Các ngưỡng (kể cả `WARMUP_DAYS`, `WARMUP_WEIGHT`) là tham số cấu hình (`wrangler.toml` vars) và sẽ được hiệu chỉnh khi có dữ liệu thật.
 
-**Uy tín người báo cáo:** khởi đầu 1.0. Tăng dần khi báo cáo của họ trùng với kết luận của số đông sau 14 ngày; giảm khi lệch nhiều lần; đặt 0.1 nếu phát hiện hành vi bất thường.
+**Uy tín người báo cáo** (chưa làm, hiện mọi tài khoản đều 1.0): khởi đầu 1.0. Tăng dần khi báo cáo của họ trùng với kết luận của số đông sau 14 ngày; giảm khi lệch nhiều lần; đặt 0.1 nếu phát hiện hành vi bất thường.
 
 ## 5. API (Workers)
 
@@ -208,7 +217,7 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
   - Theo IP (binding, mỗi 60 giây): `/install` 5, `/reports` 20, `/lookup` 120. IP chỉ dùng trong bộ nhớ làm khóa, không lưu.
   - Theo reporter (đếm trong D1, chính xác): `REPORTS_PER_HOUR_PER_REPORTER` = 10 báo cáo/giờ.
 - **Dedupe:** 1 phiếu/số/reporter/24h. Khi tính điểm, mỗi reporter chỉ tính phiếu mới nhất cho một số.
-- **Phát hiện bất thường (cron):** nhiều reporter mới cùng gắn `safe` cho một số trong thời gian ngắn; một reporter báo hàng loạt số liên tiếp; nhiều báo cáo từ cùng ASN hoặc IP. Khi phát hiện, báo cáo bị đặt `hidden` và trust score bị hạ.
+- **Phát hiện bất thường (cron):** nhiều reporter mới cùng gắn `safe` cho một số trong thời gian ngắn; một reporter báo hàng loạt số liên tiếp; nhiều tài khoản tạo gần nhau cùng bỏ phiếu cho các số giống nhau. Không dùng IP (không được lưu). Khi phát hiện, báo cáo bị đặt `hidden` và trust score bị hạ.
 - **Android:** chỉ cho báo cáo nhanh số vừa gọi đến (nhận biết qua `CallScreeningService`); báo cáo từ nguồn này có trọng số khởi đầu cao hơn.
 - **Lọc note (`sanitizeNote()`):** bỏ ký tự điều khiển và vô hình; thay email và mọi dãy từ 6 chữ số trở lên (cho phép dấu cách/chấm/phẩy/gạch xen giữa) bằng `[đã ẩn]`, trừ khi ngay sau là đơn vị tiền (`đ`, `đồng`, `VND`, `VNĐ`); cắt còn 280 ký tự sau khi lọc.
 

@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { hashToken } from '../src/auth';
 import { recomputeDecaying, recomputePhoneStats } from '../src/stats';
 
 const BASE = 'https://api.test/api/v1';
@@ -23,6 +24,15 @@ async function install(): Promise<string> {
   const r = await call('/install', { method: 'POST' });
   expect(r.status).toBe(201);
   return r.body.data.token as string;
+}
+
+/** Tài khoản đã tạo từ 30 ngày trước, tức đã qua thời gian làm quen (WARMUP_DAYS). */
+async function installEstablished(): Promise<string> {
+  const token = await install();
+  await env.DB.prepare('UPDATE reporters SET created_at = created_at - 30 * 86400 WHERE token_hash = ?1')
+    .bind(await hashToken(env, token))
+    .run();
+  return token;
 }
 
 function report(token: string, body: Record<string, unknown>, ip?: string) {
@@ -123,7 +133,7 @@ describe('reporting and lookup', () => {
 
   it('reaches high with 5 independent scam reporters, insufficient below 3', async () => {
     const phone = freshPhone();
-    const tokens = await Promise.all(Array.from({ length: 5 }, install));
+    const tokens = await Promise.all(Array.from({ length: 5 }, installEstablished));
     for (const [i, t] of tokens.entries()) {
       await report(t, { phone, label: 'scam', scenario: i < 3 ? 'fake_police' : 'investment' });
       const level = (await lookup(phone)).body.data.risk_level;
@@ -138,6 +148,30 @@ describe('reporting and lookup', () => {
     expect(d.first_reported_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
 
+  it('new accounts reach only medium until 5 established accounts agree', async () => {
+    const phone = freshPhone();
+    const fresh = await Promise.all(Array.from({ length: 8 }, install));
+    for (const t of fresh) await report(t, { phone, label: 'scam' });
+    // 8 tài khoản mới: score 4, tỷ lệ 1.0, nhưng chưa ai qua thời gian làm quen.
+    expect((await lookup(phone)).body.data).toMatchObject({ risk_level: 'medium', unique_scam_reporters: 8 });
+    const old = await Promise.all(Array.from({ length: 5 }, installEstablished));
+    for (const t of old) await report(t, { phone, label: 'scam' });
+    expect((await lookup(phone)).body.data.risk_level).toBe('high');
+  });
+
+  it('cron upgrades votes from new accounts once they pass the warm-up period', async () => {
+    const phone = freshPhone();
+    const e164 = `+84${phone.slice(1)}`;
+    const fresh = await Promise.all(Array.from({ length: 5 }, install));
+    for (const t of fresh) await report(t, { phone, label: 'scam' });
+    expect((await lookup(phone)).body.data.risk_level).toBe('medium');
+    // 4 ngày sau, không có báo cáo mới: 5 × 0.5^(4/30) = 4.56 → high.
+    await recomputeDecaying(env, Math.floor(Date.now() / 1000) + 4 * 86_400);
+    expect((await lookup(phone)).body.data.risk_level).toBe('high');
+    expect((await env.DB.prepare('SELECT score FROM phone_stats WHERE phone = ?1').bind(e164).first<{ score: number }>())!.score)
+      .toBeCloseTo(5 * Math.pow(0.5, 4 / 30), 2);
+  });
+
   it('dedupes the same label from the same reporter on the same day', async () => {
     const phone = freshPhone();
     const t = await install();
@@ -150,7 +184,7 @@ describe('reporting and lookup', () => {
 
   it("counts only each reporter's latest vote, even within the same second", async () => {
     const phone = freshPhone();
-    const t = await install();
+    const t = await installEstablished();
     await report(t, { phone, label: 'scam' });
     await report(t, { phone, label: 'safe' });
     const d = (await lookup(phone)).body.data;
@@ -164,7 +198,7 @@ describe('reporting and lookup', () => {
   it('caps high at medium while a dispute is open', async () => {
     const phone = freshPhone();
     const e164 = `+84${phone.slice(1)}`;
-    const tokens = await Promise.all(Array.from({ length: 6 }, install));
+    const tokens = await Promise.all(Array.from({ length: 6 }, installEstablished));
     for (const t of tokens.slice(0, 5)) await report(t, { phone, label: 'scam' });
     expect((await lookup(phone)).body.data.risk_level).toBe('high');
     await env.DB.prepare('UPDATE phone_stats SET under_review = 1 WHERE phone = ?1').bind(e164).run();
@@ -176,7 +210,7 @@ describe('reporting and lookup', () => {
   it('ignores hidden reports and banned reporters', async () => {
     const phone = freshPhone();
     const e164 = `+84${phone.slice(1)}`;
-    const tokens = await Promise.all(Array.from({ length: 5 }, install));
+    const tokens = await Promise.all(Array.from({ length: 5 }, installEstablished));
     for (const t of tokens) await report(t, { phone, label: 'scam' });
     expect((await lookup(phone)).body.data.risk_level).toBe('high');
     await env.DB.prepare(
@@ -235,7 +269,7 @@ describe('GET /sync/blocklist', () => {
     // 3 số high mới, 1 số chỉ có 1 người báo (insufficient).
     const highs = [freshPhone(), freshPhone(), freshPhone()];
     for (const phone of highs) {
-      const tokens = await Promise.all(Array.from({ length: 5 }, install));
+      const tokens = await Promise.all(Array.from({ length: 5 }, installEstablished));
       for (const t of tokens) await report(t, { phone, label: 'scam' });
     }
     const lone = freshPhone();
@@ -279,7 +313,7 @@ describe('cron: time decay', () => {
   it('downgrades a number whose reports have aged', async () => {
     const phone = freshPhone();
     const e164 = `+84${phone.slice(1)}`;
-    const tokens = await Promise.all(Array.from({ length: 6 }, install));
+    const tokens = await Promise.all(Array.from({ length: 6 }, installEstablished));
     for (const t of tokens) await report(t, { phone, label: 'scam' });
     expect((await lookup(phone)).body.data.risk_level).toBe('high');
     // 120 ngày sau: 6 × 0.5^4 = 0.375 → low.

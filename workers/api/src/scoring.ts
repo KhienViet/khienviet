@@ -12,6 +12,8 @@ export interface Vote {
   createdAt: number;
   /** reporters.trust_score, 0.1 .. 3.0 */
   trust: number;
+  /** reporters.created_at, Unix epoch giây. Dùng cho thời gian làm quen. */
+  reporterCreatedAt: number;
 }
 
 export interface ScoringConfig {
@@ -22,12 +24,16 @@ export interface ScoringConfig {
   ratioMedium: number;
   ratioHigh: number;
   highMinScamReporters: number;
+  warmupDays: number;
+  warmupWeight: number;
 }
 
 export interface ScoreResult {
   score: number;
   uniqueReporters: number;
   uniqueScamReporters: number;
+  /** Người báo lừa đảo có tài khoản đã qua thời gian làm quen. Dùng cho ngưỡng `high`. */
+  establishedScamReporters: number;
   scamRatio: number;
   riskLevel: RiskLevel;
 }
@@ -44,13 +50,15 @@ type ThresholdVars = Pick<
   | 'RATIO_MEDIUM'
   | 'RATIO_HIGH'
   | 'HIGH_MIN_SCAM_REPORTERS'
+  | 'WARMUP_DAYS'
+  | 'WARMUP_WEIGHT'
 >;
 
 /** Đọc ngưỡng từ biến môi trường. Thiếu hoặc sai thì ném lỗi: không tính điểm với ngưỡng đoán. */
 export function configFromEnv(env: { [K in keyof ThresholdVars]: string }): ScoringConfig {
-  const num = (name: keyof ThresholdVars): number => {
+  const num = (name: keyof ThresholdVars, max = Infinity): number => {
     const v = Number(env[name]);
-    if (env[name] === undefined || env[name] === '' || !Number.isFinite(v) || v < 0) {
+    if (env[name] === undefined || env[name] === '' || !Number.isFinite(v) || v < 0 || v > max) {
       throw new Error(`invalid scoring config: ${name}`);
     }
     return v;
@@ -63,26 +71,44 @@ export function configFromEnv(env: { [K in keyof ThresholdVars]: string }): Scor
     ratioMedium: num('RATIO_MEDIUM'),
     ratioHigh: num('RATIO_HIGH'),
     highMinScamReporters: num('HIGH_MIN_SCAM_REPORTERS'),
+    warmupDays: num('WARMUP_DAYS'),
+    // Trọng số làm quen > 1 sẽ khiến tài khoản mới nặng hơn tài khoản cũ.
+    warmupWeight: num('WARMUP_WEIGHT', 1),
   };
 }
 
 /**
- * score      = Σ (0.5^(tuổi_ngày / half_life) × trust × v_label)
- * scam_ratio = unique_scam_reporters / unique_reporters
+ * w_warmup   = WARMUP_WEIGHT nếu tài khoản chưa đủ WARMUP_DAYS ngày tuổi (tính đến `now`), ngược lại 1
+ * w          = 0.5^(tuổi_phiếu_ngày / half_life) × trust × w_warmup
+ * score      = Σ (w × v_label)
+ * scam_ratio = Σ w(phiếu scam) / Σ w(mọi phiếu)
+ * Mức `high` còn cần đủ HIGH_MIN_SCAM_REPORTERS người báo lừa đảo có tài khoản đã qua thời gian làm quen.
  * Nếu số đang có khiếu nại (underReview), mức `high` bị hạ xuống `medium`:
  * giao diện hiển thị "Đang xem xét", và app không tự động chặn.
  */
 export function scoreVotes(votes: Vote[], now: number, underReview: boolean, cfg: ScoringConfig): ScoreResult {
   let score = 0;
+  let totalWeight = 0;
+  let scamWeight = 0;
   let uniqueScamReporters = 0;
+  let establishedScamReporters = 0;
   for (const v of votes) {
     const ageDays = Math.max(0, now - v.createdAt) / DAY; // phiếu "ở tương lai" (lệch giờ) tính như mới
     const wTime = Math.pow(0.5, ageDays / cfg.halfLifeDays);
-    score += wTime * v.trust * LABEL_VALUE[v.label];
-    if (v.label === 'scam') uniqueScamReporters++;
+    // Tuổi tài khoản tính tại thời điểm tính điểm (không phải lúc bỏ phiếu), để người dùng thật
+    // báo ngay sau khi cài app vẫn được đủ trọng số khi tài khoản qua thời gian làm quen.
+    const established = now - v.reporterCreatedAt >= cfg.warmupDays * DAY;
+    const w = wTime * v.trust * (established ? 1 : cfg.warmupWeight);
+    score += w * LABEL_VALUE[v.label];
+    totalWeight += w;
+    if (v.label === 'scam') {
+      scamWeight += w;
+      uniqueScamReporters++;
+      if (established) establishedScamReporters++;
+    }
   }
   const uniqueReporters = votes.length;
-  const scamRatio = uniqueReporters === 0 ? 0 : uniqueScamReporters / uniqueReporters;
+  const scamRatio = totalWeight === 0 ? 0 : scamWeight / totalWeight;
 
   let riskLevel: RiskLevel;
   if (uniqueReporters < cfg.minReporters) {
@@ -90,7 +116,7 @@ export function scoreVotes(votes: Vote[], now: number, underReview: boolean, cfg
   } else if (
     score >= cfg.scoreHigh &&
     scamRatio >= cfg.ratioHigh &&
-    uniqueScamReporters >= cfg.highMinScamReporters
+    establishedScamReporters >= cfg.highMinScamReporters
   ) {
     riskLevel = 'high';
   } else if (score >= cfg.scoreMedium && scamRatio >= cfg.ratioMedium) {
@@ -100,5 +126,5 @@ export function scoreVotes(votes: Vote[], now: number, underReview: boolean, cfg
   }
   if (underReview && riskLevel === 'high') riskLevel = 'medium';
 
-  return { score, uniqueReporters, uniqueScamReporters, scamRatio, riskLevel };
+  return { score, uniqueReporters, uniqueScamReporters, establishedScamReporters, scamRatio, riskLevel };
 }
