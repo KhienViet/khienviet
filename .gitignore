@@ -31,3 +31,6 @@ captures/
 *.env
 .env*
 dumps/
+
+# Kotlin 2.x per-project cache
+.kotlin/

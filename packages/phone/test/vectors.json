@@ -6,6 +6,8 @@
     { "input": "0912.345.678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
     { "input": "0912-345-678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
     { "input": "  0912345678  ", "expected": { "e164": "+84912345678", "kind": "mobile" } },
+    { "input": "0912\u00a0345\u00a0678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
+    { "input": "\u202f0912 345 678\u3000", "expected": { "e164": "+84912345678", "kind": "mobile" } },
     { "input": "84912345678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
     { "input": "+84912345678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
     { "input": "+84 912 345 678", "expected": { "e164": "+84912345678", "kind": "mobile" } },
