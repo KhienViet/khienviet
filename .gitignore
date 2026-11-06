@@ -1,0 +1,33 @@
+# OS / editors
+.DS_Store
+*.sdr/
+.idea/
+.vscode/
+*.iml
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+*.sqlite
+*.d1.sql
+
+# Android
+.gradle/
+build/
+local.properties
+*.keystore
+*.jks
+keystore.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Never commit real data or secrets
+*.env
+.env*
+dumps/
