@@ -49,6 +49,8 @@ Dự án cộng đồng, phi lợi nhuận, mã nguồn mở. Người dùng ghi
 - [ ] Thông báo sau cuộc gọi từ số lạ: "Báo cáo nhanh?" (1 chạm).
 - [ ] Đồng bộ danh sách số nguy cơ cao xuống máy để dùng khi offline.
 - [ ] Tùy chọn tự động chặn số nguy cơ cao.
+- [ ] Bản đầu: `minSdk 29` (Android 10). Lý do: cách để người dùng chọn app làm app sàng lọc cuộc gọi là `RoleManager.ROLE_CALL_SCREENING`, có từ API 29 (đã xác minh trên tài liệu Android). `CallScreeningService` có từ API 24, nhưng trên Android 7–9 **chưa xác minh** app không phải trình gọi điện mặc định có dùng được hay không: cần thử trên emulator API 28 trước khi quyết định.
+- [ ] Hỗ trợ Android cũ (Android 7–9, API 24–28) ở chế độ rút gọn: tra cứu và báo cáo thủ công (dán số, chia sẻ số từ app khác), đồng bộ danh sách để tra offline; **không** cảnh báo khi có cuộc gọi đến. Không xin quyền `READ_CALL_LOG`/`READ_PHONE_STATE` để bù, vì trái nguyên tắc không đọc lịch sử cuộc gọi và bị Google Play hạn chế. Trước khi làm: kiểm tra tỷ lệ máy Android 7–9 tại Việt Nam để quyết định có đáng không.
 - [ ] Phát hành trên Google Play (chuẩn bị giải trình quyền) và APK trên GitHub Releases.
 - [ ] Tài khoản Google Play cá nhân: công khai tên pháp lý, quốc gia và email nhà phát triển; địa chỉ chỉ công khai nếu có kiếm tiền, nên **không** thu tiền ủng hộ qua Google Play billing.
 - [ ] Tài khoản cá nhân tạo sau 13/11/2023 phải chạy closed test với tối thiểu 12 người thử, liên tục 14 ngày, trước khi lên production. Chuẩn bị nhóm người thử sớm.
