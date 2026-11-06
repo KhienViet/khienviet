@@ -34,9 +34,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fail=1
   fi
 
-  # 2. Danh tính: tác giả và người commit phải dùng địa chỉ noreply của GitHub.
+  # 2. Danh tính (tùy chọn): tác giả và người commit phải dùng địa chỉ noreply của GitHub.
+  #    Bật: git config khienviet.requireNoreply true   (bắt buộc với máy của người vận hành)
+  bad=""
+  [ "$(git config --bool khienviet.requireNoreply || echo false)" = "true" ] && \
   bad=$(git log --format='%h %ae %ce' $range | awk '$2 !~ /@users\.noreply\.github\.com$/ || $3 !~ /@users\.noreply\.github\.com$/')
-  if [ -n "$bad" ]; then
+  if [ -n "${bad:-}" ]; then
     echo "pre-push: commit không dùng email noreply của GitHub:" >&2
     echo "$bad" >&2
     echo "  Sửa: git config user.email '<id>+<user>@users.noreply.github.com' rồi amend/rebase." >&2

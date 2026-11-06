@@ -148,11 +148,11 @@ Tất cả trả về JSON. Endpoint ghi yêu cầu Turnstile token (web) hoặc
 | POST | `/api/v1/install` | App đăng ký install token (ẩn danh) | — |
 | POST | `/api/v1/disputes` | Gửi khiếu nại | — |
 
-Ví dụ response tra cứu:
+Ví dụ response tra cứu (số và số liệu là **minh họa**: không dùng số điện thoại có thể có thật trong tài liệu, nhất là kèm nhãn nguy cơ):
 
 ```json
 {
-  "phone": "+84912345678",
+  "phone": "+849XXXXXXXX",
   "risk_level": "high",
   "total_reports": 128,
   "scam_reports": 117,
