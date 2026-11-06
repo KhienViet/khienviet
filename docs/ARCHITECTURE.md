@@ -45,12 +45,16 @@ flowchart LR
 
 ## 3. Mô hình dữ liệu (D1)
 
+Nguồn chuẩn là các migration trong `workers/api/migrations/`; khối dưới đây phải khớp với chúng. Hiện tại: `0001_init.sql`.
+
 ```sql
--- Mỗi người báo cáo được nhận diện bằng token ẩn danh, không lưu thông tin cá nhân.
+-- Schema ban đầu. Xem docs/ARCHITECTURE.md mục 3. Không sửa file này sau khi đã áp dụng.
+
+-- Mỗi người báo cáo được nhận diện bằng install token ẩn danh, không lưu thông tin cá nhân.
 CREATE TABLE reporters (
-  id            TEXT PRIMARY KEY,          -- UUID
-  token_hash    TEXT NOT NULL UNIQUE,      -- SHA-256(device/install token + pepper)
-  trust_score   REAL NOT NULL DEFAULT 1.0, -- 0.1 .. 3.0
+  id            TEXT PRIMARY KEY,              -- UUID
+  token_hash    TEXT NOT NULL UNIQUE,          -- HMAC-SHA256(PEPPER, install token), hex
+  trust_score   REAL NOT NULL DEFAULT 1.0,     -- 0.1 .. 3.0
   report_count  INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   banned        INTEGER NOT NULL DEFAULT 0
@@ -59,52 +63,59 @@ CREATE TABLE reporters (
 -- Mỗi dòng là một cuộc gọi được ghi nhận.
 CREATE TABLE reports (
   id            TEXT PRIMARY KEY,
-  phone         TEXT NOT NULL,             -- E.164
+  phone         TEXT NOT NULL,                 -- E.164
   reporter_id   TEXT NOT NULL REFERENCES reporters(id),
   label         TEXT NOT NULL CHECK (label IN ('scam','spam','safe','unknown')),
-  scenario      TEXT,                      -- 'fake_police','fake_shipper','investment','loan','prize',...
-  note          TEXT,                      -- tối đa 280 ký tự, lọc PII
-  source        TEXT NOT NULL,             -- 'web','android','ios','seed'
-  called_at     INTEGER,                   -- thời điểm cuộc gọi (nếu có)
+  scenario      TEXT,
+  note          TEXT,                          -- tối đa 280 ký tự, đã lọc PII
+  source        TEXT NOT NULL CHECK (source IN ('web','android','ios','seed')),
+  called_at     INTEGER,
   created_at    INTEGER NOT NULL,
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','hidden','removed'))
 );
 CREATE INDEX idx_reports_phone ON reports(phone, created_at);
 CREATE INDEX idx_reports_reporter ON reports(reporter_id, created_at);
 
--- Một người chỉ được tính 1 phiếu cho mỗi số trong mỗi 24h.
+-- Một reporter chỉ được 1 phiếu cùng nhãn cho mỗi số trong mỗi ngày (UTC).
 CREATE UNIQUE INDEX uq_reports_dedupe
   ON reports(phone, reporter_id, label, created_at / 86400);
 
--- Bảng tổng hợp, cập nhật khi ghi báo cáo và tính lại bởi cron.
+-- Bảng tổng hợp, tính lại khi có báo cáo mới và bởi cron.
 CREATE TABLE phone_stats (
-  phone              TEXT PRIMARY KEY,
-  total_reports      INTEGER NOT NULL DEFAULT 0,   -- số cuộc gọi được ghi nhận
-  scam_reports       INTEGER NOT NULL DEFAULT 0,
-  spam_reports       INTEGER NOT NULL DEFAULT 0,
-  safe_reports       INTEGER NOT NULL DEFAULT 0,
-  unique_reporters   INTEGER NOT NULL DEFAULT 0,
+  phone                 TEXT PRIMARY KEY,
+  total_reports         INTEGER NOT NULL DEFAULT 0,
+  scam_reports          INTEGER NOT NULL DEFAULT 0,
+  spam_reports          INTEGER NOT NULL DEFAULT 0,
+  safe_reports          INTEGER NOT NULL DEFAULT 0,
+  unique_reporters      INTEGER NOT NULL DEFAULT 0,
   unique_scam_reporters INTEGER NOT NULL DEFAULT 0,
-  score              REAL NOT NULL DEFAULT 0,
-  risk_level         TEXT NOT NULL DEFAULT 'insufficient', -- insufficient|low|medium|high
-  top_scenarios      TEXT,                          -- JSON
-  first_reported_at  INTEGER,
-  last_reported_at   INTEGER,
-  under_review       INTEGER NOT NULL DEFAULT 0     -- đang có khiếu nại
+  score                 REAL NOT NULL DEFAULT 0,
+  risk_level            TEXT NOT NULL DEFAULT 'insufficient'
+                        CHECK (risk_level IN ('insufficient','low','medium','high')),
+  top_scenarios         TEXT,                  -- JSON
+  first_reported_at     INTEGER,
+  last_reported_at      INTEGER,
+  under_review          INTEGER NOT NULL DEFAULT 0,
+  updated_at            INTEGER NOT NULL DEFAULT 0  -- đổi khi risk_level hoặc unique_scam_reporters đổi; dùng cho sync delta
 );
 CREATE INDEX idx_stats_risk ON phone_stats(risk_level, last_reported_at);
+CREATE INDEX idx_stats_updated ON phone_stats(updated_at, phone);
 
 -- Khiếu nại từ chủ thuê bao.
 CREATE TABLE disputes (
   id           TEXT PRIMARY KEY,
   phone        TEXT NOT NULL,
-  contact      TEXT NOT NULL,     -- mã hóa khi lưu, xóa sau khi xử lý xong
+  contact      TEXT NOT NULL,                  -- mã hóa khi lưu, xóa sau khi xử lý xong
   reason       TEXT NOT NULL,
   status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','accepted','rejected')),
   created_at   INTEGER NOT NULL,
   resolved_at  INTEGER
 );
 ```
+
+Ghi chú:
+- `token_hash` là HMAC-SHA256 với khóa `PEPPER` (Worker secret), không phải SHA-256 của chuỗi ghép: HMAC là cách chuẩn để dùng một khóa bí mật khi băm.
+- `phone_stats.updated_at` chỉ đổi khi `risk_level` hoặc `unique_scam_reporters` đổi, để app đồng bộ delta mà không tải lại các số không thay đổi.
 
 ## 4. Thuật toán điểm nguy cơ (công khai)
 
@@ -128,7 +139,11 @@ Phân loại mức nguy cơ:
 | `medium` | `score >= 1.5` và `scam_ratio >= 0.3` |
 | `high` | `score >= 4` và `scam_ratio >= 0.7` và `unique_scam_reporters >= 5` |
 
-Nếu `under_review = 1`, không hiển thị `high` mà hiển thị "Đang xem xét khiếu nại" kèm số liệu thô.
+**Phiếu nào được tính:** chỉ báo cáo `active` của reporter chưa bị cấm (`banned = 0`). Mỗi reporter chỉ tính phiếu mới nhất cho một số (theo `created_at`, nếu trùng giây thì theo thứ tự ghi). Các số đếm thô (`total_reports`, `scam_reports`...) đếm mọi báo cáo `active` của reporter chưa bị cấm. Phiếu có thời điểm ở tương lai (lệch đồng hồ) được tính như phiếu mới, không nặng hơn.
+
+Nếu `under_review = 1`, mức `high` bị hạ thành `medium`: giao diện hiển thị "Đang xem xét khiếu nại" kèm số liệu thô, và app không tự động chặn số đó (chỉ chặn `high`).
+
+**Điểm yếu đã biết:** `scam_ratio` đếm người báo, không theo trọng số uy tín. Vì vậy nhiều tài khoản đã bị hạ trust 0.1 cùng báo `safe` vẫn kéo tỷ lệ xuống: ví dụ 6 người báo lừa đảo + 20 tài khoản trust 0.1 báo an toàn cho `score` = 4 nhưng `scam_ratio` = 0.23, nên mức là `low`. Test `scoring.test.ts` ghi lại hành vi này. Phương án đang cân nhắc: tính `scam_ratio` theo trọng số `w_time × w_trust`.
 
 Các ngưỡng là tham số cấu hình (`wrangler.toml` vars) và sẽ được hiệu chỉnh khi có dữ liệu thật.
 
@@ -136,41 +151,66 @@ Các ngưỡng là tham số cấu hình (`wrangler.toml` vars) và sẽ đượ
 
 ## 5. API (Workers)
 
-Tất cả trả về JSON. Endpoint ghi yêu cầu Turnstile token (web) hoặc install token đã đăng ký (app).
+Base: `/api/v1`. Response thành công `{ "data": ... }`, lỗi `{ "error": { "code", "message" } }`. Thời gian trả về dạng ISO 8601 UTC.
+Endpoint ghi của app yêu cầu `Authorization: Bearer <install token>`; endpoint ghi của web sẽ dùng Turnstile (chưa làm).
 
-| Method | Path | Mô tả | Cache |
-|---|---|---|---|
-| GET | `/api/v1/lookup/:phone` | Tra cứu một số (số liệu, mức nguy cơ, kịch bản) | Edge 120s |
-| POST | `/api/v1/reports` | Gửi báo cáo `{phone, label, scenario?, note?, called_at?}` | — |
-| GET | `/api/v1/stats/summary` | Thống kê tổng (tổng báo cáo, số nguy cơ cao, xu hướng) | Edge 10 phút |
-| GET | `/api/v1/stats/top?period=7d` | Danh sách số bị báo nhiều nhất (**số đã che một phần**) | Edge 10 phút |
-| GET | `/api/v1/sync/blocklist?since=` | Danh sách số `high`/`medium` cho app, có phân trang và delta | KV, 1 giờ |
-| POST | `/api/v1/install` | App đăng ký install token (ẩn danh) | — |
-| POST | `/api/v1/disputes` | Gửi khiếu nại | — |
+| Method | Path | Xác thực | Mô tả | Trạng thái |
+|---|---|---|---|---|
+| POST | `/install` | rate limit theo IP | Tạo install token ẩn danh, trả về **một lần**: `{data:{token}}` | ✅ |
+| POST | `/reports` | install token | Gửi báo cáo `{phone, label, source, scenario?, note?, called_at?}` | ✅ |
+| GET | `/lookup/:phone` | — (rate limit theo IP) | Tra cứu một số. `Cache-Control: public, max-age=120` | ✅ |
+| GET | `/sync/blocklist?since=&cursor=&limit=` | install token | Danh sách cho app, phân trang và delta | ✅ |
+| GET | `/stats/summary` | — | Thống kê tổng | chưa làm |
+| GET | `/stats/top?period=7d` | — | Số bị báo nhiều nhất (**số đã che một phần**) | chưa làm |
+| POST | `/disputes` | Turnstile | Gửi khiếu nại | chưa làm |
+
+**`POST /reports`:**
+- `label`: `scam` | `spam` | `safe` | `unknown`. `source`: `android` | `ios`.
+- `scenario` (tùy chọn): `fake_police`, `fake_bank`, `fake_telecom`, `fake_shipper`, `investment`, `loan`, `prize`, `job_offer`, `other`.
+- `note` (tùy chọn): qua `sanitizeNote()` trước khi lưu (mục 6).
+- `called_at` (tùy chọn): ISO 8601, không quá 30 ngày trước và không ở tương lai (cho lệch 5 phút).
+- Trả `201 {data:{accepted:true,id}}`; trùng (cùng reporter, số, nhãn, ngày UTC) trả `200 {data:{accepted:false,reason:"duplicate"}}`.
+- Lỗi: `400 invalid_json | invalid_request | invalid_phone | invalid_called_at`, `401 unauthorized`, `403 forbidden` (reporter bị cấm), `429 rate_limited`.
+
+**`GET /sync/blocklist`:**
+- Không có `since`: mọi số `medium`/`high`.
+- Có `since` (Unix giây): mọi số có `updated_at >= since`, **kể cả số đã xuống `low`/`insufficient`**, để app xóa khỏi danh sách trên máy.
+- `limit` 1–1000 (mặc định 1000); trang tiếp theo dùng `next_cursor` (null khi hết).
+- App lưu `server_time` của trang đầu tiên làm `since` cho lần đồng bộ sau.
+- Phần tử: `{phone, risk_level, unique_scam_reporters, under_review}`.
 
 Ví dụ response tra cứu (số và số liệu là **minh họa**: không dùng số điện thoại có thể có thật trong tài liệu, nhất là kèm nhãn nguy cơ):
 
 ```json
 {
-  "phone": "+849XXXXXXXX",
-  "risk_level": "high",
-  "total_reports": 128,
-  "scam_reports": 117,
-  "unique_reporters": 96,
-  "top_scenarios": [{"key": "fake_police", "count": 71}, {"key": "investment", "count": 22}],
-  "first_reported_at": "2026-10-01T03:12:00Z",
-  "last_reported_at": "2026-11-05T09:40:00Z",
-  "under_review": false
+  "data": {
+    "phone": "+849XXXXXXXX",
+    "is_foreign": false,
+    "risk_level": "high",
+    "total_reports": 128,
+    "scam_reports": 117,
+    "spam_reports": 4,
+    "safe_reports": 2,
+    "unique_reporters": 96,
+    "unique_scam_reporters": 90,
+    "top_scenarios": [{"key": "fake_police", "count": 71}, {"key": "investment", "count": 22}],
+    "first_reported_at": "2026-10-01T03:12:00Z",
+    "last_reported_at": "2026-11-05T09:40:00Z",
+    "under_review": false
+  }
 }
 ```
 
 ## 6. Chống lạm dụng
 
-- **Turnstile** trên mọi form web; **Rate Limiting binding**: ví dụ 10 báo cáo/giờ/reporter, 30 báo cáo/giờ/IP.
+- **Turnstile** trên mọi form web (chưa làm).
+- **Rate limit:** Rate Limiting binding của Cloudflare chỉ hỗ trợ cửa sổ 10 hoặc 60 giây, đếm gần đúng theo từng vị trí. Vì vậy:
+  - Theo IP (binding, mỗi 60 giây): `/install` 5, `/reports` 20, `/lookup` 120. IP chỉ dùng trong bộ nhớ làm khóa, không lưu.
+  - Theo reporter (đếm trong D1, chính xác): `REPORTS_PER_HOUR_PER_REPORTER` = 10 báo cáo/giờ.
 - **Dedupe:** 1 phiếu/số/reporter/24h. Khi tính điểm, mỗi reporter chỉ tính phiếu mới nhất cho một số.
 - **Phát hiện bất thường (cron):** nhiều reporter mới cùng gắn `safe` cho một số trong thời gian ngắn; một reporter báo hàng loạt số liên tiếp; nhiều báo cáo từ cùng ASN hoặc IP. Khi phát hiện, báo cáo bị đặt `hidden` và trust score bị hạ.
 - **Android:** chỉ cho báo cáo nhanh số vừa gọi đến (nhận biết qua `CallScreeningService`); báo cáo từ nguồn này có trọng số khởi đầu cao hơn.
-- **Lọc note:** bỏ số điện thoại, email, số tài khoản trong ghi chú; giới hạn độ dài.
+- **Lọc note (`sanitizeNote()`):** bỏ ký tự điều khiển và vô hình; thay email và mọi dãy từ 6 chữ số trở lên (cho phép dấu cách/chấm/phẩy/gạch xen giữa) bằng `[đã ẩn]`, trừ khi ngay sau là đơn vị tiền (`đ`, `đồng`, `VND`, `VNĐ`); cắt còn 280 ký tự sau khi lọc.
 
 ## 7. Quyền riêng tư
 
@@ -224,6 +264,11 @@ Ví dụ response tra cứu (số và số liệu là **minh họa**: không dù
 ```
 
 ## 11. Giới hạn đã biết
+
+- **Số được tra cứu nằm trong URL** (`/lookup/:phone`), nên có thể xuất hiện trong log request của nền tảng (ví dụ `wrangler dev` in ra đường dẫn). Trên production, kiểm tra cấu hình Workers Logs/Logpush trước khi bật, vì quy tắc là chỉ log số bị tra cứu ở dạng đã che. **Chưa xác minh** mặc định của Workers Logs.
+- **Cache edge cho `/lookup` chưa có tác dụng chắc chắn:** API đặt `Cache-Control: public, max-age=120`, nhưng **chưa xác minh** Cloudflare có tự cache response của Worker hay không; nếu không, cần dùng Cache API.
+- **`/install` chỉ có rate limit theo IP**, chưa có xác thực thiết bị (ví dụ Play Integrity), nên có thể bị tạo hàng loạt token để spam báo cáo. Phát hiện bất thường (mục 6) là lớp phòng thủ chính cho tới khi có xác thực thiết bị.
+- **Cron tính lại tuần tự** từng số; đủ cho giai đoạn đầu, cần chia lô hoặc dùng Queues khi số lượng lớn.
 
 - D1 phù hợp với quy mô vừa. Nếu lượng ghi tăng mạnh, cân nhắc tách bảng `reports` theo thời gian hoặc chuyển sang Postgres (Neon/Supabase) qua Hyperdrive.
 - iOS không thể tra cứu theo thời gian thực khi có cuộc gọi đến; chỉ dùng được danh sách offline.

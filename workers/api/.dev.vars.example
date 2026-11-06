@@ -1,0 +1,3 @@
+# Sao chép thành .dev.vars (không commit). Production: npx wrangler secret put PEPPER
+# Tạo giá trị: openssl rand -base64 48
+PEPPER=replace-with-at-least-32-random-characters
