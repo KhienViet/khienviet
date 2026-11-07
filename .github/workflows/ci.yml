@@ -1,0 +1,57 @@
+# Chạy test cho mọi push và pull request.
+# Action bên thứ ba được ghim theo commit SHA (bản phát hành ít nhất 14 ngày tuổi khi ghim).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ts:
+    name: TypeScript (phone + API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      # Cài đúng theo package-lock.json; không chạy script cài đặt của dependency.
+      - run: npm ci --ignore-scripts
+
+      - name: packages/phone
+        working-directory: packages/phone
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: workers/api
+        working-directory: workers/api
+        run: |
+          npm run typecheck
+          npm test
+
+  android:
+    name: Android (Kotlin phone vectors + app build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # gradle-wrapper.properties ghim distributionSha256Sum, nên bản Gradle tải về được kiểm tra.
+      - name: Test and build
+        working-directory: apps/android
+        run: ./gradlew --no-daemon :core:phone:test :app:assembleDebug
