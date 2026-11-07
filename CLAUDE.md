@@ -62,8 +62,13 @@ cd packages/phone && npm test
 ### Logic tính điểm
 - Công thức và ngưỡng nằm trong `workers/api/src/scoring.ts`, các ngưỡng đọc từ biến môi trường.
 - Mọi thay đổi công thức phải cập nhật **cả** `docs/ARCHITECTURE.md` mục 4 và trang "Cách tính điểm" trên web, vì công thức được công khai.
+- Người dùng chỉ báo cáo một loại: "lừa đảo". Không thêm nhãn khác (an toàn, làm phiền...) khi chưa có quyết định của người vận hành.
 - Mỗi reporter chỉ tính phiếu mới nhất của họ cho một số. Không đếm theo lượt báo cáo thô.
-- Phải có test cho các trường hợp: dưới ngưỡng người báo, spam nhãn `safe`, giảm trọng số theo thời gian, đang khiếu nại.
+- Người báo chỉ rút được báo cáo của chính mình trong 1 giờ sau khi gửi.
+- Phải có test cho các trường hợp: dưới ngưỡng người báo (3), thời gian làm quen của tài khoản mới, giảm trọng số theo thời gian, đang khiếu nại, rút báo cáo trong và sau 1 giờ.
+
+### App
+- App **không bao giờ** chặn, từ chối hay tắt chuông cuộc gọi, ở mọi mức nguy cơ. App chỉ hiện chỉ báo để người nghe tự quyết định.
 
 ### Endpoint ghi
 - Mọi endpoint ghi phải kiểm tra Turnstile (web) hoặc install token hợp lệ (app), và áp rate limit.
@@ -80,7 +85,7 @@ cd packages/phone && npm test
 - Tên biến, hàm và file bằng tiếng Anh; comment có thể bằng tiếng Việt.
 - Response API dạng `{ data }` hoặc `{ error: { code, message } }`, có version `/api/v1/`.
 - Thời gian lưu dạng Unix epoch (giây); API trả ISO 8601 UTC.
-- Test: vitest với `@cloudflare/vitest-pool-workers` cho Worker. Viết test trước khi sửa logic tính điểm hoặc chuẩn hóa số.
+- Test: vitest với `@cloudflare/vitest-plugin` cho Worker (`@cloudflare/vitest-pool-workers` đã ngừng phát triển). Viết test trước khi sửa logic tính điểm hoặc chuẩn hóa số.
 - Commit theo Conventional Commits (`feat:`, `fix:`, `docs:`...).
 
 ## Khi không chắc
